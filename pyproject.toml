@@ -1,6 +1,6 @@
 [project]
 name = "video-summarizer"
-version = "0.1.0"
+version = "0.1.0-mvp"
 description = "B站/本地视频总结器 - 自动提取音频/字幕，转成文字并生成摘要"
 authors = [{name = "Developer"}]
 requires-python = ">=3.10"
@@ -31,3 +31,14 @@ packages = ["video_summarizer"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[project.metadata]
+tags = [
+    "video-summarizer",
+    "bilibili",
+    "whisper",
+    "llm",
+]
+
+[project.metadata.urls]
+Repository = "https://github.com/example/video-summarizer"

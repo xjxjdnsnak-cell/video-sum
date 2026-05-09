@@ -1,5 +1,8 @@
 # Video Summarizer
 
+> **版本**: v0.1.0-mvp
+> **下一步**: v0.2.0-real-asr - 让 faster-whisper 在真实视频上稳定转写
+
 B站/本地视频总结器 - 自动提取音频/字幕，转成文字，按时间戳分段，调用 LLM 生成摘要，最后导出 Markdown 笔记。
 
 ## 安装
