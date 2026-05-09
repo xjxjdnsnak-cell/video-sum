@@ -1,7 +1,7 @@
 # Video Summarizer
 
-> **版本**: v0.5.0-local-web-ui
-> **目标**: 本地 Web UI，支持视频上传、链接输入、历史记录和评估
+> **版本**: v0.6.0-search-and-qa
+> **目标**: 本地搜索与问答功能，支持关键词搜索和基于转写的智能问答
 
 B站/本地视频总结器 - 自动提取音频/字幕，转成文字，按时间戳分段，调用 LLM 生成摘要，最后导出 Markdown 笔记。
 
@@ -16,6 +16,57 @@ pip install -e .
 - Python 3.10+
 - FFmpeg
 - yt-dlp
+
+---
+
+## 搜索与问答
+
+### 1. 重建搜索索引
+
+```bash
+video-summarizer rebuild-index
+```
+
+首次使用前需要重建索引，以便支持快速全文搜索。
+
+### 2. 搜索视频内容
+
+```bash
+# 全局搜索
+video-summarizer search "关键词"
+
+# 限定视频ID
+video-summarizer search "关键词" --video-id VIDEO_ID
+
+# 限制结果数量
+video-summarizer search "关键词" --limit 10
+```
+
+搜索范围：
+- 转写文本 (transcript_segments)
+- 摘要内容 (summary_chunks)
+- 总摘要 (final_summaries)
+- 关键要点
+- 术语
+
+### 3. 视频问答
+
+```bash
+# 基于视频转写进行问答
+video-summarizer ask VIDEO_ID "这个视频主要讲了什么？"
+
+# 使用真实 LLM
+video-summarizer ask VIDEO_ID "这个视频主要讲了什么？" --llm-provider openai
+```
+
+特点：
+- 必须基于 transcript_segments 和 summary_chunks 回答
+- 回答必须附带引用时间戳
+- 证据不足时，明确返回"不确定"
+
+### 4. FTS5 支持
+
+默认使用 SQLite FTS5 全文搜索。如果 SQLite 不支持 FTS5，会自动回退到 LIKE 搜索。
 
 ---
 
@@ -331,6 +382,11 @@ video-summarizer doctor                    # 环境检查
 # Web UI
 video-summarizer web                        # 启动 Web UI
 
+# 搜索与问答
+video-summarizer rebuild-index              # 重建搜索索引
+video-summarizer search "关键词"             # 搜索视频内容
+video-summarizer ask VIDEO_ID "问题"        # 基于视频问答
+
 # B站工具
 video-summarizer inspect-url <URL/BV号>    # 检查视频信息
 video-summarizer summarize-url <URL/BV号>  # 总结 B站视频
@@ -514,6 +570,9 @@ video_summarizer/
 │   └── json_exporter.py   # JSON 导出
 ├── evaluator/
 │   └── evaluate.py          # 质量评估
+├── search/
+│   ├── evidence_retriever.py  # 证据检索 + FTS5 搜索
+│   └── qa_prompt.py          # 问答 Prompt 生成
 ├── web_ui/
 │   └── app.py               # Streamlit Web UI
 └── utils/

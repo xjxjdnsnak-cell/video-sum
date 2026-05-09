@@ -30,6 +30,12 @@ from .summarizer.prompts import NoteStyle
 from .exporters.markdown import export_markdown
 from .exporters.srt import export_srt
 from .exporters.json_exporter import export_json
+from .search.evidence_retriever import (
+    check_fts5_support, init_fts_tables, rebuild_all_indexes,
+    search_fts, search_like, get_evidence,
+    get_transcript_for_qa, get_summary_for_qa, get_final_summary_for_qa
+)
+from .search.qa_prompt import generate_qa_prompt, parse_qa_response
 
 app = typer.Typer(
     name="video-summarizer",
@@ -946,6 +952,158 @@ def _get_score_emoji(score: float) -> str:
         return "⚠️ 及格"
     else:
         return "❌ 需改进"
+
+
+@app.command("search")
+def search(
+    keyword: str = typer.Argument(..., help="搜索关键词"),
+    video_id: Optional[int] = typer.Option(None, "--video-id", help="限定视频ID"),
+    limit: int = typer.Option(20, "--limit", "-n", help="返回结果数量"),
+):
+    """在已转写的视频内容中搜索关键词"""
+    if not check_fts5_support():
+        console.print("[yellow]FTS5 不支持，将使用 LIKE 搜索（速度较慢）[/yellow]")
+        console.print()
+
+    try:
+        init_fts_tables()
+    except Exception as e:
+        logger.warning(f"FTS tables init warning: {e}")
+
+    console.print(f"[cyan]搜索关键词: {keyword}[/cyan]")
+    if video_id:
+        console.print(f"[cyan]限定视频: {video_id}[/cyan]")
+    console.print()
+
+    try:
+        results = search_fts(keyword, video_id, limit)
+    except Exception as e:
+        logger.warning(f"FTS search failed, falling back to LIKE: {e}")
+        results = search_like(keyword, video_id, limit)
+
+    if not results:
+        console.print("[yellow]没有找到匹配结果[/yellow]")
+        return
+
+    console.print(f"[green]找到 {len(results)} 个结果[/green]")
+    console.print()
+
+    table = Table(title="搜索结果")
+    table.add_column("Video ID", style="cyan")
+    table.add_column("标题", style="green")
+    table.add_column("时间", style="yellow")
+    table.add_column("来源", style="blue")
+    table.add_column("命中片段", style="white")
+
+    for r in results[:limit]:
+        time_str = f"[{r.start:.1f}s - {r.end:.1f}s]"
+        text_preview = r.text[:60] + "..." if len(r.text) > 60 else r.text
+        table.add_row(
+            str(r.video_id),
+            (r.title or "Untitled")[:20],
+            time_str,
+            r.source,
+            text_preview
+        )
+
+    console.print(table)
+
+
+@app.command("ask")
+def ask(
+    video_id: int = typer.Argument(..., help="视频ID"),
+    question: str = typer.Argument(..., help="问题"),
+    llm_provider: str = typer.Option("mock", "--llm-provider", help="LLM provider: mock, openai, ollama"),
+):
+    """基于视频转写内容进行问答"""
+    info = get_video_info(video_id)
+    if not info:
+        console.print(f"[red]Error: Video {video_id} not found[/red]")
+        raise typer.Exit(code=1)
+
+    if not has_transcript_segments(video_id):
+        console.print(f"[red]Error: Video {video_id} 没有转写数据[/red]")
+        raise typer.Exit(code=1)
+
+    console.print(f"[cyan]正在分析视频 {video_id}...[/cyan]")
+    console.print(f"[dim]问题: {question}[/dim]")
+    console.print()
+
+    transcript = get_transcript_for_qa(video_id)
+    summaries = get_summary_for_qa(video_id)
+    final_summary = get_final_summary_for_qa(video_id)
+
+    if not transcript and not summaries:
+        console.print("[red]Error: 视频没有可用的转写或摘要数据[/red]")
+        raise typer.Exit(code=1)
+
+    prompt = generate_qa_prompt(question, transcript, summaries, final_summary)
+
+    if llm_provider == "mock":
+        console.print("[yellow]使用 Mock LLM（模拟回答）[/yellow]")
+        mock_response = f'''{{
+    "answer": "根据视频内容，这个问题的主要答案是...（Mock模式，未使用真实LLM）",
+    "evidence": [
+        {{"timestamp": {transcript[0]['start'] if transcript else 0}, "text": "{transcript[0]['text'][:50] if transcript else 'N/A'}..."}},
+        {{"timestamp": {transcript[1]['start'] if len(transcript) > 1 else 0}, "text": "{transcript[1]['text'][:50] if len(transcript) > 1 else 'N/A'}..."}}
+    ],
+    "cited_timestamps": [{transcript[0]['start'] if transcript else 0}, {transcript[1]['start'] if len(transcript) > 1 else 0}],
+    "uncertainty": false
+}}'''
+        result = parse_qa_response(mock_response)
+    else:
+        from .summarizer.llm_client import get_llm_client
+        try:
+            client = get_llm_client(llm_provider)
+            response = client.generate(prompt)
+            result = parse_qa_response(response)
+        except Exception as e:
+            console.print(f"[red]LLM 调用失败: {e}[/red]")
+            raise typer.Exit(code=1)
+
+    console.print(Panel("[bold cyan]回答[/bold cyan]", expand=False))
+    console.print()
+
+    if result.get("uncertainty"):
+        console.print(f"[yellow]{result['answer']}[/yellow]")
+    else:
+        console.print(result["answer"])
+
+    console.print()
+    if result.get("evidence"):
+        console.print("[bold]引用来源:[/bold]")
+        for ev in result["evidence"][:5]:
+            console.print(f"  [{ev['timestamp']:.1f}s] {ev['text'][:80]}...")
+
+    console.print()
+    if result.get("cited_timestamps"):
+        console.print(f"[dim]引用时间戳: {result['cited_timestamps']}[/dim]")
+
+
+@app.command("rebuild-index")
+def rebuild_index():
+    """重建搜索索引（FTS5）"""
+    console.print("[cyan]正在初始化 FTS5 表...[/cyan]")
+    try:
+        init_fts_tables()
+        console.print("[green]✓ FTS5 表初始化完成[/green]")
+    except Exception as e:
+        console.print(f"[red]✗ FTS5 表初始化失败: {e}[/red]")
+        console.print("[yellow]尝试使用 LIKE 搜索替代...[/yellow]")
+        raise typer.Exit(code=1)
+
+    if not check_fts5_support():
+        console.print("[yellow]警告: SQLite 不支持 FTS5，将使用 LIKE 搜索[/yellow]")
+        return
+
+    console.print("[cyan]正在重建索引...[/cyan]")
+
+    try:
+        rebuild_all_indexes()
+        console.print("[green]✓ 索引重建完成[/green]")
+    except Exception as e:
+        console.print(f"[red]✗ 索引重建失败: {e}[/red]")
+        raise typer.Exit(code=1)
 
 
 @app.command("list")

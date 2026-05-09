@@ -21,6 +21,12 @@ from video_summarizer.exporters.markdown import export_markdown
 from video_summarizer.exporters.json_exporter import export_json
 from video_summarizer.exporters.srt import export_srt
 from video_summarizer.summarizer.prompts import NoteStyle
+from video_summarizer.search.evidence_retriever import (
+    check_fts5_support, init_fts_tables, rebuild_all_indexes,
+    search_fts, search_like, get_evidence,
+    get_transcript_for_qa, get_summary_for_qa, get_final_summary_for_qa
+)
+from video_summarizer.search.qa_prompt import generate_qa_prompt, parse_qa_response
 
 
 st.set_page_config(
@@ -104,13 +110,19 @@ def render_home_page():
     
     st.markdown("---")
     
-    tab1, tab2 = st.tabs(["📤 新建任务", "📋 历史记录"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📤 新建任务", "📋 历史记录", "🔍 搜索内容", "💬 视频问答"])
     
     with tab1:
         render_new_task_form()
     
     with tab2:
         render_history()
+    
+    with tab3:
+        render_search_page()
+    
+    with tab4:
+        render_qa_page()
 
 
 def render_new_task_form():
@@ -750,6 +762,155 @@ def render_video_detail(video_id):
                 
                 except Exception as e:
                     st.error(f"评估失败: {str(e)}")
+
+
+def render_search_page():
+    st.subheader("🔍 搜索视频内容")
+    
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        keyword = st.text_input("搜索关键词", placeholder="输入要搜索的关键词...")
+    with col2:
+        video_id = st.number_input("限定视频ID（可选）", min_value=1, step=1, value=0)
+        if video_id == 0:
+            video_id = None
+    
+    limit = st.slider("返回结果数量", 5, 50, 20)
+    
+    if st.button("🔍 搜索", type="primary"):
+        if not keyword:
+            st.error("请输入搜索关键词")
+            return
+        
+        with st.spinner("正在搜索..."):
+            try:
+                if not check_fts5_support():
+                    st.warning("FTS5 不支持，将使用 LIKE 搜索")
+                    results = search_like(keyword, video_id, limit)
+                else:
+                    try:
+                        init_fts_tables()
+                        results = search_fts(keyword, video_id, limit)
+                    except Exception as e:
+                        st.warning(f"FTS 搜索失败，fallback: {e}")
+                        results = search_like(keyword, video_id, limit)
+                
+                if not results:
+                    st.info("没有找到匹配结果")
+                    return
+                
+                st.success(f"找到 {len(results)} 个结果")
+                
+                for i, result in enumerate(results):
+                    with st.container():
+                        col1, col2 = st.columns([1, 4])
+                        with col1:
+                            st.markdown(f"**Video {result.video_id}**")
+                            st.caption(result.title[:30] if result.title else "Untitled")
+                        with col2:
+                            if result.source in ["transcript", "chunk_summary"]:
+                                st.markdown(f"[{result.start:.1f}s - {result.end:.1f}s] {result.text[:200]}...")
+                            else:
+                                st.markdown(result.text[:200] + "...")
+                            
+                            source_color = {
+                                "transcript": "🟢",
+                                "chunk_summary": "🔵",
+                                "final_summary": "🟡"
+                            }.get(result.source, "⚪")
+                            st.caption(f"{source_color} 来源: {result.source} | 得分: {result.score:.2f}")
+                        
+                        st.markdown("---")
+            
+            except Exception as e:
+                st.error(f"搜索失败: {str(e)}")
+
+
+def render_qa_page():
+    st.subheader("💬 视频问答")
+    
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        video_id = st.number_input("视频ID", min_value=1, step=1, value=1)
+        
+        videos = get_all_videos()
+        video_options = {v['id']: v.get('title', 'Untitled') for v in videos}
+        if video_id in video_options:
+            st.info(f"当前视频: {video_options[video_id]}")
+        
+        llm_provider = st.selectbox(
+            "LLM Provider",
+            ["mock", "openai-compatible", "ollama"],
+            index=0
+        )
+    
+    with col2:
+        question = st.text_area("输入问题", placeholder="例如：这个视频主要讲了什么？")
+        
+        if st.button("💬 提问", type="primary"):
+            if not question:
+                st.error("请输入问题")
+                return
+            
+            info = get_video_info(video_id)
+            if not info:
+                st.error(f"视频 {video_id} 不存在")
+                return
+            
+            if not info.get('transcript_count', 0) > 0:
+                st.error(f"视频 {video_id} 没有转写数据")
+                return
+            
+            with st.spinner("正在分析..."):
+                try:
+                    transcript = get_transcript_for_qa(video_id)
+                    summaries = get_summary_for_qa(video_id)
+                    final_summary = get_final_summary_for_qa(video_id)
+                    
+                    if not transcript and not summaries:
+                        st.error("视频没有可用的转写或摘要数据")
+                        return
+                    
+                    if llm_provider == "mock":
+                        st.warning("使用 Mock LLM（模拟回答）")
+                        mock_response = f'''{{
+    "answer": "根据视频内容...（Mock模式，未使用真实LLM）",
+    "evidence": [
+        {{"timestamp": {transcript[0]['start'] if transcript else 0}, "text": "{transcript[0]['text'][:50] if transcript else 'N/A'}..."}},
+        {{"timestamp": {transcript[1]['start'] if len(transcript) > 1 else 0}, "text": "{transcript[1]['text'][:50] if len(transcript) > 1 else 'N/A'}..."}}
+    ],
+    "cited_timestamps": [{transcript[0]['start'] if transcript else 0}, {transcript[1]['start'] if len(transcript) > 1 else 0}],
+    "uncertainty": false
+}}'''
+                        result = parse_qa_response(mock_response)
+                    else:
+                        prompt = generate_qa_prompt(question, transcript, summaries, final_summary)
+                        try:
+                            from video_summarizer.summarizer.llm_client import get_llm_client
+                            client = get_llm_client(llm_provider)
+                            response = client.generate(prompt)
+                            result = parse_qa_response(response)
+                        except Exception as e:
+                            st.error(f"LLM 调用失败: {str(e)}")
+                            return
+                    
+                    st.markdown("### 回答")
+                    
+                    if result.get("uncertainty"):
+                        st.warning(result["answer"])
+                    else:
+                        st.markdown(result["answer"])
+                    
+                    if result.get("evidence"):
+                        st.markdown("#### 引用来源")
+                        for ev in result["evidence"][:5]:
+                            st.markdown(f"**[{ev['timestamp']:.1f}s]** {ev['text'][:100]}...")
+                    
+                    if result.get("cited_timestamps"):
+                        st.caption(f"引用时间戳: {result['cited_timestamps']}")
+                
+                except Exception as e:
+                    st.error(f"问答失败: {str(e)}")
 
 
 def main():
