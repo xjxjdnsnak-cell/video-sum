@@ -283,3 +283,30 @@ def get_all_videos():
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM videos ORDER BY created_at DESC")
         return [dict(row) for row in cursor.fetchall()]
+
+
+def create_video_record(
+    source_type: str,
+    source_path: Optional[str] = None,
+    url: Optional[str] = None,
+    title: Optional[str] = None,
+    author: Optional[str] = None,
+    duration: Optional[float] = None,
+) -> int:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO videos (source_type, source_path, url, title, author, duration, status, current_stage)
+            VALUES (?, ?, ?, ?, ?, ?, 'processing', 'created')
+        """, (source_type, source_path, url, title, author, duration))
+        return cursor.lastrowid
+
+
+def update_video_duration(video_id: int, duration: float):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE videos SET duration = ?, updated_at = ? WHERE id = ?",
+            (duration, datetime.now().isoformat(), video_id)
+        )
+        conn.commit()

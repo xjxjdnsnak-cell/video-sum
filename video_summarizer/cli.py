@@ -16,7 +16,7 @@ from .db import (
     update_video_stage, update_video_status, update_video_outputs,
     get_video_info, has_transcript_segments, has_summary_chunks, has_final_summary,
     clear_transcript_segments, clear_summary_chunks, clear_final_summary, clear_video_outputs,
-    get_all_videos
+    get_all_videos, create_video_record, update_video_duration
 )
 from .media.ffmpeg import extract_audio, get_video_duration, check_ffmpeg_installed, FFmpegError
 from .media.downloader import (
@@ -1145,30 +1145,6 @@ def list_videos(
         )
 
     console.print(table)
-
-
-def create_video_record(
-    source_type: str,
-    source_path: Optional[str] = None,
-    url: Optional[str] = None,
-    title: Optional[str] = None,
-    author: Optional[str] = None,
-    duration: Optional[float] = None
-) -> int:
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO videos (source_type, source_path, url, title, author, duration, status, current_stage)
-            VALUES (?, ?, ?, ?, ?, ?, 'processing', 'created')
-        """, (source_type, source_path, url, title, author, duration))
-        return cursor.lastrowid
-
-
-def update_video_duration(video_id: int, duration: float):
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE videos SET duration = ? WHERE id = ?", (duration, video_id))
-        conn.commit()
 
 
 if __name__ == "__main__":

@@ -923,12 +923,10 @@ class TestLLMClientProvider:
 
 class TestResumeBehaviorFix:
     def test_resume_with_existing_summary_chunks_no_unboundlocalerror(self, setup_env):
-        from video_summarizer.db import init_db
-        init_db()
-
-        from video_summarizer.cli import create_video_record
+        from video_summarizer.db import init_db, create_video_record
         from video_summarizer.summarizer.pipeline import save_transcript, save_summary_chunks, save_final_summary
 
+        init_db()
         video_id = create_video_record(
             source_type="local",
             title="Test Resume Video"
@@ -966,3 +964,57 @@ class TestResumeBehaviorFix:
 
         assert result_chunks is not None
         assert isinstance(result_chunks, list)
+
+
+class TestCreateVideoRecord:
+    def test_create_video_record_inserts_and_returns_id(self, setup_env):
+        from video_summarizer.db import init_db, create_video_record, get_video_info
+        init_db()
+
+        video_id = create_video_record(
+            source_type="local",
+            source_path="/path/to/video.mp4",
+            title="Test Video",
+            author="Test Author",
+            duration=120.5
+        )
+
+        assert isinstance(video_id, int)
+        assert video_id > 0
+
+        video_info = get_video_info(video_id)
+        assert video_info is not None
+        assert video_info["title"] == "Test Video"
+        assert video_info["author"] == "Test Author"
+        assert video_info["duration"] == 120.5
+        assert video_info["source_type"] == "local"
+
+    def test_update_video_duration_updates_duration(self, setup_env):
+        from video_summarizer.db import init_db, create_video_record, update_video_duration, get_video_info
+        init_db()
+
+        video_id = create_video_record(
+            source_type="local",
+            title="Test Video"
+        )
+
+        info_before = get_video_info(video_id)
+        assert info_before["duration"] is None
+
+        update_video_duration(video_id, 300.5)
+
+        info_after = get_video_info(video_id)
+        assert info_after["duration"] == 300.5
+
+
+class TestWebUIImportsFromDB:
+    def test_web_ui_does_not_import_create_video_record_from_cli(self):
+        with open("/workspace/video_summarizer/web_ui/app.py", "r") as f:
+            content = f.read()
+        assert "from video_summarizer.cli import create_video_record" not in content
+        assert "from video_summarizer.cli import update_video_duration" not in content
+
+    def test_web_ui_imports_create_video_record_from_db(self):
+        with open("/workspace/video_summarizer/web_ui/app.py", "r") as f:
+            content = f.read()
+        assert "from video_summarizer.db import" in content

@@ -308,7 +308,7 @@ def process_local_video(
     chunk_max: int,
     keep_audio: bool
 ) -> int:
-    from video_summarizer.cli import create_video_record, update_video_duration, update_video_status, update_video_stage
+    from video_summarizer.db import create_video_record, update_video_duration, update_video_status, update_video_stage
     from video_summarizer.media.ffmpeg import extract_audio, get_video_duration, FFmpegError
     from video_summarizer.asr.faster_whisper_engine import FasterWhisperEngine, FasterWhisperError
     from video_summarizer.summarizer.pipeline import save_transcript, summarize_video_pipeline
@@ -409,7 +409,7 @@ def process_bilibili_url(
     chunk_min: int = 3,
     chunk_max: int = 5
 ) -> int:
-    from video_summarizer.cli import create_video_record, update_video_status, update_video_stage
+    from video_summarizer.db import create_video_record, update_video_status, update_video_stage
     from video_summarizer.media.downloader import download_audio, download_subtitles, get_video_info, DownloaderError
     from video_summarizer.asr.subtitle_parser import parse_srt
     from video_summarizer.summarizer.pipeline import save_transcript, summarize_video_pipeline
