@@ -525,6 +525,8 @@ def _run_summarize(
             console.print(f"[green]Using existing summary chunks for video {video_id}[/green]")
             logger.info(f"Using existing summary chunks for video {video_id}")
             result_chunks = get_summary_chunks(video_id)
+            result_chapters = get_chapters(video_id)
+            result_quotes = get_quotes(video_id)
         else:
             console.print("[cyan]Summarizing video...[/cyan]")
             logger.info(f"Generating summaries for video {video_id}")
@@ -541,9 +543,6 @@ def _run_summarize(
             result_quotes = result.get("quotes", [])
 
         video_title = get_video_info(video_id).get('title', 'Untitled') if not is_url else info.title
-
-        result_chapters = result.get("chapters", [])
-        result_quotes = result.get("quotes", [])
 
         update_video_stage(video_id, "exported")
 

@@ -895,5 +895,74 @@ class TestEvaluator:
 
         evaluator = Evaluator(transcript, [], final_summary)
         result = evaluator.evaluate()
-        
+
         assert len(result.warnings) > 0 or len(result.issues) > 0
+
+
+class TestLLMClientProvider:
+    def test_get_llm_client_mock(self):
+        from video_summarizer.summarizer.llm_client import get_llm_client, MockLLMClient
+        client = get_llm_client("mock")
+        assert isinstance(client, MockLLMClient)
+
+    def test_get_llm_client_ollama(self):
+        from video_summarizer.summarizer.llm_client import get_llm_client, OllamaLLMClient
+        client = get_llm_client("ollama")
+        assert isinstance(client, OllamaLLMClient)
+
+    def test_get_llm_client_unknown_raises_error(self):
+        from video_summarizer.summarizer.llm_client import get_llm_client, LLMError
+        with pytest.raises(LLMError) as exc_info:
+            get_llm_client("unknown-provider")
+        assert "Unknown LLM provider" in str(exc_info.value)
+
+    def test_get_llm_client_openai_and_openai_compatible_use_same_class(self):
+        from video_summarizer.summarizer.llm_client import OpenAILLMClient
+        assert OpenAILLMClient is not None
+
+
+class TestResumeBehaviorFix:
+    def test_resume_with_existing_summary_chunks_no_unboundlocalerror(self, setup_env):
+        from video_summarizer.db import init_db
+        init_db()
+
+        from video_summarizer.cli import create_video_record
+        from video_summarizer.summarizer.pipeline import save_transcript, save_summary_chunks, save_final_summary
+
+        video_id = create_video_record(
+            source_type="local",
+            title="Test Resume Video"
+        )
+
+        save_transcript(video_id, [
+            {"start": 0.0, "end": 5.0, "text": "Test segment", "source": "mock"}
+        ])
+
+        save_summary_chunks(video_id, [
+            {
+                "start": 0.0,
+                "end": 180.0,
+                "source_text": "Original source text",
+                "summary": "Existing summary",
+                "topic": "Test",
+                "key_points": ["point1"],
+                "important_terms": [],
+                "quote": "",
+                "chapter_hint": ""
+            }
+        ])
+
+        save_final_summary(video_id, {
+            "one_sentence_summary": "Test summary"
+        })
+
+        from video_summarizer.db import has_summary_chunks
+        assert has_summary_chunks(video_id) is True
+
+        from video_summarizer.summarizer.pipeline import get_summary_chunks, get_chapters, get_quotes
+        result_chunks = get_summary_chunks(video_id)
+        result_chapters = get_chapters(video_id)
+        result_quotes = get_quotes(video_id)
+
+        assert result_chunks is not None
+        assert isinstance(result_chunks, list)

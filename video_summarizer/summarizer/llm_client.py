@@ -532,7 +532,7 @@ def get_llm_client(provider: Optional[str] = None) -> BaseLLMClient:
 
     if provider == "mock":
         return MockLLMClient()
-    elif provider == "openai":
+    elif provider in ("openai", "openai-compatible"):
         return OpenAILLMClient()
     elif provider == "ollama":
         return OllamaLLMClient()
