@@ -1,6 +1,6 @@
 [project]
 name = "video-summarizer"
-version = "0.2.0-real-asr"
+version = "0.2.1-local-robustness"
 description = "B站/本地视频总结器 - 自动提取音频/字幕，转成文字并生成摘要"
 authors = [{name = "Developer"}]
 requires-python = ">=3.10"

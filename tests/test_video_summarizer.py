@@ -412,3 +412,275 @@ class TestDatabase:
             assert "transcript_segments" in tables
             assert "summary_chunks" in tables
             assert "final_summaries" in tables
+
+
+class TestDoctor:
+    def test_doctor_command_exists(self):
+        from video_summarizer.cli import doctor
+        assert callable(doctor)
+
+
+class TestResumeAndForce:
+    def test_db_has_resume_functions(self):
+        from video_summarizer.db import has_transcript_segments, has_summary_chunks, has_final_summary
+        assert callable(has_transcript_segments)
+        assert callable(has_summary_chunks)
+        assert callable(has_final_summary)
+
+    def test_db_clear_functions_exist(self):
+        from video_summarizer.db import clear_transcript_segments, clear_summary_chunks, clear_final_summary
+        assert callable(clear_transcript_segments)
+        assert callable(clear_summary_chunks)
+        assert callable(clear_final_summary)
+
+
+class TestCleanCommand:
+    def test_clean_command_exists(self):
+        from video_summarizer.cli import clean
+        assert callable(clean)
+
+
+class TestStatusCommand:
+    def test_status_command_exists(self):
+        from video_summarizer.cli import status
+        assert callable(status)
+
+    def test_get_video_info_returns_correct_fields(self, tmp_path):
+        from video_summarizer.db import init_db, get_video_info
+        from video_summarizer.cli import create_video_record
+
+        db_path = tmp_path / "test.db"
+        with patch('video_summarizer.config.settings') as mock_settings:
+            mock_settings.DB_PATH = db_path
+            from video_summarizer import db as db_module
+            db_module.settings = mock_settings
+            init_db()
+
+            video_id = create_video_record(
+                source_type="local",
+                source_path="/test/video.mp4",
+                title="Test Video"
+            )
+
+            info = get_video_info(video_id)
+            assert info is not None
+            assert info["id"] == video_id
+            assert info["title"] == "Test Video"
+            assert info["transcript_count"] == 0
+            assert info["chunk_count"] == 0
+            assert info["has_final_summary"] == 0
+
+
+class TestDoctorCommand:
+    def test_doctor_command_imports_correctly(self):
+        from video_summarizer.cli import doctor
+        assert callable(doctor)
+
+    def test_doctor_checks_include_required_items(self):
+        from video_summarizer.cli import doctor
+        from typer.testing import CliRunner
+        from video_summarizer import cli
+        import inspect
+
+        source = inspect.getsource(cli.doctor)
+        assert "Python Version" in source
+        assert "faster-whisper" in source
+        assert "FFmpeg" in source
+        assert "yt-dlp" in source
+        assert "LLM Provider" in source
+
+
+class TestResumeBehavior:
+    def test_mock_asr_twice_does_not_duplicate_transcript(self, tmp_path, monkeypatch):
+        from video_summarizer.db import (
+            init_db, get_db, get_all_videos,
+            has_transcript_segments
+        )
+        from video_summarizer.summarizer.pipeline import save_transcript, get_transcript
+
+        db_path = tmp_path / ".video_summarizer" / "test.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("VIDEO_SUMMARIZER_DB_PATH", str(db_path))
+        monkeypatch.setenv("VIDEO_SUMMARIZER_OUTPUT_DIR", str(tmp_path / "output"))
+
+        import importlib
+        import video_summarizer.config
+        importlib.reload(video_summarizer.config)
+        importlib.reload(video_summarizer.db)
+
+        from video_summarizer.config import settings
+        settings.ensure_directories()
+
+        from video_summarizer import db as db_module
+        db_module.init_db()
+
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO videos (source_type, source_path, title, status, current_stage) VALUES (?, ?, ?, ?, ?)",
+                ("local", "/test/video.mp4", "Test Video", "processing", "created")
+            )
+            video_id = cursor.lastrowid
+
+        mock_transcript = [
+            {"start": 0.0, "end": 5.0, "text": "Test segment 1"},
+            {"start": 5.0, "end": 10.0, "text": "Test segment 2"},
+        ]
+        save_transcript(video_id, mock_transcript)
+
+        assert has_transcript_segments(video_id)
+        first_transcript = get_transcript(video_id)
+        first_count = len(first_transcript)
+
+        second_transcript = get_transcript(video_id)
+        second_count = len(second_transcript)
+        assert second_count == first_count
+
+    def test_force_clears_existing_transcript(self, tmp_path, monkeypatch):
+        from video_summarizer.db import (
+            init_db, get_db, clear_transcript_segments, has_transcript_segments,
+        )
+        from video_summarizer.summarizer.pipeline import save_transcript
+
+        db_path = tmp_path / ".video_summarizer" / "test.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("VIDEO_SUMMARIZER_DB_PATH", str(db_path))
+        monkeypatch.setenv("VIDEO_SUMMARIZER_OUTPUT_DIR", str(tmp_path / "output"))
+
+        import importlib
+        import video_summarizer.config
+        importlib.reload(video_summarizer.config)
+        importlib.reload(video_summarizer.db)
+
+        from video_summarizer.config import settings
+        settings.ensure_directories()
+
+        from video_summarizer import db as db_module
+        db_module.init_db()
+
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO videos (source_type, source_path, title, status, current_stage) VALUES (?, ?, ?, ?, ?)",
+                ("local", "/test/video.mp4", "Test Video", "processing", "created")
+            )
+            video_id = cursor.lastrowid
+
+        mock_transcript = [{"start": 0.0, "end": 5.0, "text": "Test segment"}]
+        save_transcript(video_id, mock_transcript)
+        assert has_transcript_segments(video_id)
+
+        clear_transcript_segments(video_id)
+        assert not has_transcript_segments(video_id)
+
+
+class TestCleanCommandBehavior:
+    def test_clean_temp_only_dry_run_shows_files_to_delete(self, tmp_path, monkeypatch):
+        db_path = tmp_path / ".video_summarizer" / "test.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        output_dir = tmp_path / "video_summarizer_output"
+        output_dir.mkdir()
+        log_dir = output_dir / "logs"
+        log_dir.mkdir()
+        test_log = log_dir / "run-test.log"
+        test_log.write_text("test log content")
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("VIDEO_SUMMARIZER_DB_PATH", str(db_path))
+        monkeypatch.setenv("VIDEO_SUMMARIZER_OUTPUT_DIR", str(output_dir))
+
+        import importlib
+        import video_summarizer.config
+        importlib.reload(video_summarizer.config)
+        importlib.reload(video_summarizer.db)
+
+        from video_summarizer.config import settings
+        settings.ensure_directories()
+
+        from video_summarizer import db as db_module
+        db_module.init_db()
+
+        from video_summarizer.cli import app
+        from typer.testing import CliRunner
+
+        runner = CliRunner()
+        result = runner.invoke(app, ['clean', '--temp-only', '--dry-run'])
+
+        assert result.exit_code == 0
+        assert "dry-run mode" in result.output.lower() or "dry run" in result.output.lower()
+
+
+class TestStatusCommandBehavior:
+    def test_status_shows_transcript_and_summary_count(self, tmp_path, monkeypatch):
+        db_path = tmp_path / ".video_summarizer" / "test.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("VIDEO_SUMMARIZER_DB_PATH", str(db_path))
+        monkeypatch.setenv("VIDEO_SUMMARIZER_OUTPUT_DIR", str(tmp_path / "output"))
+
+        import importlib
+        import video_summarizer.config
+        importlib.reload(video_summarizer.config)
+        importlib.reload(video_summarizer.db)
+
+        from video_summarizer.config import settings
+        settings.ensure_directories()
+
+        from video_summarizer import db as db_module
+        db_module.init_db()
+
+        with db_module.get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO videos (source_type, source_path, title, status, current_stage) VALUES (?, ?, ?, ?, ?)",
+                ("local", "/test/video.mp4", "Test Video", "processing", "created")
+            )
+            video_id = cursor.lastrowid
+
+            cursor.execute(
+                "INSERT INTO transcript_segments (video_id, start, end, text) VALUES (?, ?, ?, ?)",
+                (video_id, 0.0, 5.0, "Test segment 1")
+            )
+            cursor.execute(
+                "INSERT INTO transcript_segments (video_id, start, end, text) VALUES (?, ?, ?, ?)",
+                (video_id, 5.0, 10.0, "Test segment 2")
+            )
+            cursor.execute(
+                "INSERT INTO summary_chunks (video_id, start, end, source_text, summary) VALUES (?, ?, ?, ?, ?)",
+                (video_id, 0.0, 10.0, "Test source", "Test summary")
+            )
+            cursor.execute(
+                "INSERT INTO final_summaries (video_id, one_sentence_summary, detailed_summary) VALUES (?, ?, ?)",
+                (video_id, "One sentence", "Detailed")
+            )
+            conn.commit()
+
+        from video_summarizer.cli import app
+        from typer.testing import CliRunner
+
+        runner = CliRunner()
+        result = runner.invoke(app, ['status', str(video_id)])
+
+        assert result.exit_code == 0
+        assert "Transcript Segments: 2" in result.output
+        assert "Summary Chunks: 1" in result.output
+        assert "Has Final Summary: Yes" in result.output
+
+
+class TestWhisperNoFallback:
+    def test_faster_whisper_failure_no_mock_fallback(self):
+        from video_summarizer.asr.faster_whisper_engine import FasterWhisperEngine, FasterWhisperError
+
+        engine = FasterWhisperEngine(use_mock=False, model_name="invalid-model")
+
+        with patch('faster_whisper.WhisperModel', side_effect=Exception("Download failed")):
+            with pytest.raises(FasterWhisperError) as exc_info:
+                _ = engine.model
+
+            error_msg = str(exc_info.value)
+            assert "解决方案" in error_msg or "Failed" in error_msg

@@ -1,7 +1,7 @@
 # Video Summarizer
 
-> **版本**: v0.2.0-real-asr
-> **目标**: 让 faster-whisper 在真实视频上稳定转写
+> **版本**: v0.2.1-local-robustness
+> **目标**: 提升本地视频总结器的稳定性、断点续跑能力和可诊断性
 
 B站/本地视频总结器 - 自动提取音频/字幕，转成文字，按时间戳分段，调用 LLM 生成摘要，最后导出 Markdown 笔记。
 
@@ -21,68 +21,88 @@ pip install -e .
 
 ## 快速开始
 
-### 1. Mock 流程测试（无需网络）
-
-用于测试完整流程，不需要真实 ASR 模型：
+### 1. 环境诊断
 
 ```bash
-# 完整总结（Mock ASR + Mock LLM）
+video-summarizer doctor
+```
+
+检查 Python 版本、FFmpeg、yt-dlp、faster-whisper、数据库路径、输出目录等。
+
+### 2. Mock 流程测试（无需网络）
+
+```bash
+# 完整总结
 video-summarizer summarize-local ./test.mp4 \
   --asr-provider mock \
   --llm-provider mock \
   --output ./outputs
-
-# 仅转写（Mock ASR）
-video-summarizer transcribe ./test.mp4 \
-  --asr-provider mock
 ```
 
-### 2. 真实 ASR 转写验收
-
-在有网络的环境中，依次执行：
+### 3. 断点续跑
 
 ```bash
-# Step 1: 预下载模型（可选，但推荐）
+# 默认开启 --resume，已有的转写不会重复生成
+video-summarizer summarize-local ./test.mp4 \
+  --asr-provider mock \
+  --llm-provider mock
+
+# 第二次运行会自动跳过已完成的阶段
+# 只会重新执行未完成的阶段
+
+# 强制重跑全部阶段
+video-summarizer summarize-local ./test.mp4 \
+  --asr-provider mock \
+  --llm-provider mock \
+  --force
+```
+
+### 4. 查看任务状态
+
+```bash
+video-summarizer status VIDEO_ID
+```
+
+显示：视频来源、标题、当前阶段、转写片段数量、摘要状态、输出文件路径等。
+
+### 5. 清理缓存
+
+```bash
+# 查看将要删除的文件（dry-run）
+video-summarizer clean --temp-only
+
+# 真正删除
+video-summarizer clean --temp-only --yes
+
+# 删除所有缓存（包括模型）
+video-summarizer clean --all-cache --yes
+```
+
+---
+
+## 真实 ASR 转写（需网络环境）
+
+```bash
+# 预下载模型
 video-summarizer download-model --model tiny
 
-# 或指定本地模型缓存目录
-video-summarizer download-model --model tiny --model-dir ./models
-
-# Step 2: 转写视频
+# 转写视频
 video-summarizer transcribe ./test.mp4 \
   --asr-provider faster-whisper \
   --model tiny \
   --device cpu
-
-# 成功标准：输出 JSON 和 SRT
-# [
-#   {
-#     "start": 0.0,
-#     "end": 3.2,
-#     "text": "真实识别出来的内容"
-#   }
-# ]
-```
-
-### 3. B站链接测试
-
-```bash
-video-summarizer summarize-url "https://www.bilibili.com/video/BVxxx" \
-  --asr-provider mock \
-  --llm-provider mock
-```
-
-如果遇到 HTTP 412/403，需要设置 Cookie：
-```
-解决方案：
-1. 在浏览器中登录B站
-2. 导出Cookie为Netscape格式
-3. 保存到 ~/.video_summarizer/cookies.txt
 ```
 
 ---
 
 ## 参数说明
+
+### 断点续跑参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--resume` | True | 从现有检查点继续 |
+| `--force` | False | 强制重跑全部阶段 |
 
 ### ASR 参数
 
@@ -106,7 +126,6 @@ video-summarizer summarize-url "https://www.bilibili.com/video/BVxxx" \
 |------|--------|------|
 | `--output` | ~ | 输出目录 |
 | `--keep-audio` | False | 保留中间音频文件 |
-| `--force` | False | 强制重新转写 |
 | `--chunk-min` | 3 | 摘要分块最小分钟数 |
 | `--chunk-max` | 5 | 摘要分块最大分钟数 |
 
@@ -115,44 +134,52 @@ video-summarizer summarize-url "https://www.bilibili.com/video/BVxxx" \
 ## 命令
 
 ```bash
-# 总结本地视频
-video-summarizer summarize-local <视频路径> [参数]
+# 诊断
+video-summarizer doctor                    # 环境检查
 
-# 总结 B站链接
-video-summarizer summarize-url <链接> [参数]
+# 任务管理
+video-summarizer status <VIDEO_ID>        # 查看任务状态
+video-summarizer list                     # 列出所有视频
+video-summarizer clean [选项]              # 清理缓存
 
-# 仅转写
-video-summarizer transcribe <视频路径> [参数]
+# 处理
+video-summarizer summarize-local <路径>    # 总结本地视频
+video-summarizer summarize-url <URL>       # 总结 B站链接
+video-summarizer transcribe <路径>         # 仅转写
+video-summarizer export <VIDEO_ID>         # 导出已有视频
 
-# 导出已有视频
-video-summarizer export <视频ID>
-
-# 列出所有视频
-video-summarizer list
-
-# 下载 Whisper 模型
-video-summarizer download-model [参数]
+# 模型
+video-summarizer download-model           # 下载 Whisper 模型
 ```
 
 ---
 
-## 配置
+## Pipeline 阶段
 
-复制 `.env.example` 为 `.env` 并配置：
-
-```bash
-# LLM 配置
-LLM_PROVIDER=mock
-OPENAI_API_KEY=your-api-key
-
-# Whisper 配置
-WHISPER_MODEL=base
-WHISPER_DEVICE=cpu
-
-# 分块设置
-CHUNK_DURATION_MIN=3
-CHUNK_DURATION_MAX=5
 ```
+created → audio_extracted → transcribed → chunked → summarized → exported
+                                    ↓
+                                failed
+```
+
+### 断点续跑规则
+
+- 已有音频则不重复提取，除非 `--force`
+- 已有 transcript_segments 则不重复 ASR，除非 `--force`
+- 已有 summary_chunks 则不重复分段摘要，除非 `--force`
+- 已有 final_summary 则不重复总摘要，除非 `--force`
+- 导出可以重复执行
+
+---
+
+## 日志
+
+每次运行生成 `logs/run-时间戳.log`，记录：
+- 命令参数
+- 每个阶段开始/结束
+- 外部命令 stderr
+- 错误堆栈
+- 输出文件路径
 
 ---
 
@@ -169,9 +196,12 @@ pytest tests/ -v
 - `subtitle_parser` - SRT 字幕解析
 - `markdown_exporter` - Markdown 导出
 - `mock pipeline` - Mock ASR + Mock LLM 完整流程
+- `doctor` - 环境诊断命令
+- `status` - 任务状态查看
+- `clean` - 清理命令
+- `resume/force` - 断点续跑
 - `ASR 隔离` - Mock ASR 不影响 Faster-Whisper
 - `fallback 保护` - Faster-Whisper 失败时不会自动 fallback
-- `model_dir` - 本地模型目录参数传递
 
 ---
 
@@ -189,13 +219,20 @@ pytest tests/ -v
 
 ---
 
+## 当前版本限制
+
+- **真实 ASR**: 需要在有网络的环境中验证 Whisper 模型下载
+- **B站链接**: 部分视频需要登录 Cookie 才能访问
+
+---
+
 ## 项目结构
 
 ```
 video_summarizer/
 ├── cli.py                    # CLI 主入口
 ├── config.py                 # 配置管理
-├── db.py                     # SQLite 数据库
+├── db.py                     # SQLite 数据库 + 断点续跑
 ├── models.py                 # 数据模型
 ├── media/
 │   ├── ffmpeg.py           # FFmpeg 音频提取

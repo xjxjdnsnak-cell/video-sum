@@ -1,5 +1,6 @@
 import sys
 import os
+import logging
 from pathlib import Path
 from typing import Optional
 import tempfile
@@ -7,11 +8,18 @@ import tempfile
 import typer
 from rich.console import Console
 from rich.table import Table
+from rich.panel import Panel
 
 from .config import settings
-from .db import get_db, init_db
+from .db import (
+    get_db, init_db, setup_logging,
+    update_video_stage, update_video_status, update_video_outputs,
+    get_video_info, has_transcript_segments, has_summary_chunks, has_final_summary,
+    clear_transcript_segments, clear_summary_chunks, clear_final_summary, clear_video_outputs,
+    get_all_videos
+)
 from .media.ffmpeg import extract_audio, get_video_duration, check_ffmpeg_installed, FFmpegError
-from .media.downloader import download_audio, download_subtitles, get_video_info, check_ytdlp_installed, DownloaderError
+from .media.downloader import download_audio, download_subtitles, get_video_info as get_url_info, check_ytdlp_installed, DownloaderError
 from .asr.faster_whisper_engine import FasterWhisperEngine, FasterWhisperError, Segment
 from .asr.subtitle_parser import parse_srt
 from .summarizer.pipeline import summarize_video_pipeline, get_transcript, get_summary_chunks, get_final_summary, save_transcript
@@ -24,6 +32,7 @@ app = typer.Typer(
     help="B站/本地视频总结器 - 自动提取音频/字幕，转成文字并生成摘要"
 )
 console = Console()
+logger = logging.getLogger(__name__)
 
 
 def check_dependencies(require_asr: bool = True):
@@ -46,7 +55,193 @@ def check_dependencies(require_asr: bool = True):
 
 @app.callback()
 def main():
+    log_file = setup_logging()
     init_db()
+    logger.info(f"Command started. Log file: {log_file}")
+
+
+@app.command("doctor")
+def doctor():
+    console.print(Panel("[bold cyan]Environment Diagnostic Report[/bold cyan]", expand=False))
+    console.print()
+
+    checks = []
+
+    checks.append(("Python Version", sys.version.split()[0], True))
+
+    try:
+        import faster_whisper
+        checks.append(("faster-whisper", "installed", True))
+    except ImportError:
+        checks.append(("faster-whisper", "NOT installed", False))
+
+    checks.append(("FFmpeg", "installed" if check_ffmpeg_installed() else "NOT installed",
+                   check_ffmpeg_installed()))
+    checks.append(("yt-dlp", "installed" if check_ytdlp_installed() else "NOT installed",
+                   check_ytdlp_installed()))
+
+    db_dir = settings.DB_PATH.parent
+    db_writable = os.access(str(db_dir), os.W_OK)
+    checks.append(("DB Directory", f"{db_dir} ({'writable' if db_writable else 'NOT writable'})", db_writable))
+
+    output_writable = os.access(str(settings.OUTPUT_DIR), os.W_OK)
+    checks.append(("Output Directory", f"{settings.OUTPUT_DIR} ({'writable' if output_writable else 'NOT writable'})",
+                   output_writable))
+
+    checks.append(("LLM Provider", settings.LLM_PROVIDER, True))
+    checks.append(("Whisper Model", settings.WHISPER_MODEL, True))
+    checks.append(("Whisper Device", settings.WHISPER_DEVICE, True))
+
+    from .db import get_all_videos
+    videos = get_all_videos()
+    checks.append(("Total Videos", str(len(videos)), True))
+
+    console.print("[bold]System Checks:[/bold]")
+    for name, value, ok in checks:
+        status = "[green]✓[/green]" if ok else "[red]✗[/red]"
+        console.print(f"  {status} {name}: [dim]{value}[/dim]")
+
+    all_ok = all(ok for _, _, ok in checks)
+    console.print()
+    if all_ok:
+        console.print("[bold green]All checks passed![/bold green]")
+    else:
+        console.print("[bold yellow]Some checks failed. Please fix the issues above.[/bold yellow]")
+        raise typer.Exit(code=1)
+
+
+@app.command("status")
+def status(video_id: int = typer.Argument(..., help="视频ID")):
+    info = get_video_info(video_id)
+    if not info:
+        console.print(f"[red]Video {video_id} not found[/red]")
+        raise typer.Exit(code=1)
+
+    console.print(Panel(f"[bold cyan]Video #{video_id} Status[/bold cyan]", expand=False))
+    console.print()
+
+    console.print(f"[bold]Basic Info:[/bold]")
+    console.print(f"  Title: {info.get('title', 'N/A')}")
+    console.print(f"  Source: {info.get('source_type', 'N/A')}")
+    if info.get('source_path'):
+        console.print(f"  Path: {info.get('source_path')}")
+    if info.get('url'):
+        console.print(f"  URL: {info.get('url')}")
+    console.print(f"  Duration: {info.get('duration', 'N/A')}s")
+    console.print()
+
+    status_color = {
+        'pending': 'yellow',
+        'processing': 'cyan',
+        'transcribed': 'blue',
+        'completed': 'green',
+        'failed': 'red'
+    }.get(info.get('status', ''), 'yellow')
+
+    console.print(f"[bold]Pipeline Status:[/bold]")
+    console.print(f"  Overall Status: [{status_color}]{info.get('status', 'unknown')}[/{status_color}]")
+    console.print(f"  Current Stage: {info.get('current_stage', 'unknown')}")
+    if info.get('failed_stage'):
+        console.print(f"  Failed Stage: [red]{info.get('failed_stage')}[/red]")
+    if info.get('last_error'):
+        console.print(f"  Last Error: [red]{info.get('last_error')[:100]}...[/red]" if len(str(info.get('last_error', ''))) > 100 else f"  Last Error: [red]{info.get('last_error')}[/red]")
+    console.print()
+
+    console.print(f"[bold]Content:[/bold]")
+    console.print(f"  Transcript Segments: {info.get('transcript_count', 0)}")
+    console.print(f"  Summary Chunks: {info.get('chunk_count', 0)}")
+    console.print(f"  Has Final Summary: {'[green]Yes[/green]' if info.get('has_final_summary') else '[yellow]No[/yellow]'}")
+    console.print()
+
+    console.print(f"[bold]Output Files:[/bold]")
+    md_path = info.get('output_markdown_path')
+    json_path = info.get('output_json_path')
+    srt_path = info.get('output_srt_path')
+    console.print(f"  Markdown: {md_path if md_path else '[yellow]Not exported[/yellow]'}")
+    console.print(f"  JSON: {json_path if json_path else '[yellow]Not exported[/yellow]'}")
+    console.print(f"  SRT: {srt_path if srt_path else '[yellow]Not exported[/yellow]'}")
+    console.print()
+
+    console.print(f"[bold]Timestamps:[/bold]")
+    console.print(f"  Created: {info.get('created_at', 'N/A')}")
+    console.print(f"  Updated: {info.get('updated_at', 'N/A')}")
+
+
+@app.command("clean")
+def clean(
+    temp_only: bool = typer.Option(False, "--temp-only", help="Only delete temporary audio/cache files"),
+    video_id: Optional[int] = typer.Option(None, "--video-id", help="Clean specific video's data"),
+    all_cache: bool = typer.Option(False, "--all-cache", help="Delete all cached models and temp files"),
+    dry_run: bool = typer.Option(True, "--dry-run", help="Show what would be deleted without actually deleting"),
+    yes: bool = typer.Option(False, "--yes", help="Actually perform the deletion"),
+):
+    if dry_run and not yes:
+        console.print("[yellow]Running in dry-run mode. Use --yes to actually delete.[/yellow]")
+        console.print()
+
+    files_to_delete = []
+    dirs_to_delete = []
+
+    if all_cache:
+        cache_dirs = [
+            Path.home() / ".cache" / "huggingface",
+            Path.home() / ".cache" / "torch",
+            settings.OUTPUT_DIR / "logs",
+        ]
+        for d in cache_dirs:
+            if d.exists():
+                dirs_to_delete.append(d)
+        temp_audio_files = list(Path(tempfile.gettempdir()).glob("video_summarizer_*.wav"))
+        files_to_delete.extend(temp_audio_files)
+
+    if video_id:
+        info = get_video_info(video_id)
+        if info:
+            for path_key in ['output_markdown_path', 'output_json_path', 'output_srt_path']:
+                path = info.get(path_key)
+                if path and Path(path).exists():
+                    files_to_delete.append(Path(path))
+
+    if temp_only:
+        temp_audio_files = list(Path(tempfile.gettempdir()).glob("video_summarizer_*.wav"))
+        files_to_delete.extend(temp_audio_files)
+        log_files = list(settings.OUTPUT_DIR.glob("logs/run-*.log")) if settings.OUTPUT_DIR.exists() else []
+        files_to_delete.extend(log_files)
+
+    if not files_to_delete and not dirs_to_delete:
+        console.print("[green]Nothing to delete.[/green]")
+        return
+
+    console.print("[bold]Files to delete:[/bold]")
+    for f in files_to_delete:
+        console.print(f"  [red]{f}[/red]")
+    for d in dirs_to_delete:
+        console.print(f"  [red]{d}/[/red]")
+
+    console.print()
+
+    if dry_run or not yes:
+        console.print("[yellow]Dry run - no files were deleted.[/yellow]")
+        if not yes:
+            console.print("[dim]Run with --yes to actually delete.[/dim]")
+    else:
+        for f in files_to_delete:
+            try:
+                f.unlink()
+                console.print(f"[green]Deleted: {f}[/green]")
+            except Exception as e:
+                console.print(f"[red]Failed to delete {f}: {e}[/red]")
+
+        for d in dirs_to_delete:
+            try:
+                import shutil
+                shutil.rmtree(d)
+                console.print(f"[green]Deleted: {d}/[/green]")
+            except Exception as e:
+                console.print(f"[red]Failed to delete {d}: {e}[/red]")
+
+        console.print()
+        console.print("[green]Cleanup complete![/green]")
 
 
 @app.command("download-model")
@@ -75,6 +270,234 @@ def download_model(
         raise typer.Exit(code=1)
 
 
+def _run_summarize(
+    video_path_or_url: str,
+    is_url: bool,
+    llm_provider: str,
+    asr_provider: str,
+    chunk_min: int,
+    chunk_max: int,
+    output: Optional[str],
+    model: str,
+    device: str,
+    language: Optional[str],
+    model_dir: Optional[str],
+    keep_audio: bool,
+    force: bool,
+    resume: bool = True,
+):
+    use_mock_asr = asr_provider.lower() == "mock"
+    check_dependencies(require_asr=not use_mock_asr)
+
+    output_dir = Path(output) if output else settings.OUTPUT_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        if is_url:
+            console.print(f"[cyan]Processing URL: {video_path_or_url}[/cyan]")
+            if use_mock_asr:
+                console.print(f"[yellow]Using Mock ASR (--asr-provider mock)[/yellow]")
+
+            console.print("[cyan]Fetching video info...[/cyan]")
+            try:
+                info = get_url_info(video_path_or_url)
+            except DownloaderError as e:
+                console.print(f"[red]yt-dlp error: {e}[/red]")
+                raise typer.Exit(code=1)
+
+            video_id = create_video_record(
+                source_type="url",
+                url=video_path_or_url,
+                title=info.title,
+                author=info.author,
+                duration=info.duration
+            )
+            logger.info(f"Created video record {video_id} for URL: {video_path_or_url}")
+
+        else:
+            video_path = Path(video_path_or_url)
+            if not video_path.exists():
+                console.print(f"[red]Error: Video file not found: {video_path}[/red]")
+                raise typer.Exit(code=1)
+
+            console.print(f"[cyan]Processing local video: {video_path.name}[/cyan]")
+            if use_mock_asr:
+                console.print(f"[yellow]Using Mock ASR (--asr-provider mock)[/yellow]")
+
+            video_id = create_video_record(
+                source_type="local",
+                source_path=str(video_path),
+                title=video_path.stem
+            )
+            logger.info(f"Created video record {video_id} for file: {video_path}")
+
+        update_video_status(video_id, "processing", "created")
+        logger.info(f"Starting pipeline for video {video_id}")
+
+        duration = None
+        audio_path = None
+
+        if is_url:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_path = Path(temp_dir)
+
+                srt_path = download_subtitles(video_path_or_url, temp_path)
+                if srt_path and srt_path.exists():
+                    console.print(f"[green]Found subtitles: {srt_path}[/green]")
+                    logger.info(f"Found subtitles for video {video_id}")
+                    console.print("[cyan]Parsing subtitles...[/cyan]")
+                    subtitle_segments = parse_srt(str(srt_path))
+                    transcript_data = [
+                        {"start": s.start, "end": s.end, "text": s.text, "source": "subtitle"}
+                        for s in subtitle_segments
+                    ]
+                    save_transcript(video_id, transcript_data)
+                    update_video_stage(video_id, "transcribed")
+                else:
+                    console.print("[yellow]No subtitles found, downloading audio for ASR...[/yellow]")
+                    logger.info(f"No subtitles found for video {video_id}, downloading audio")
+
+                    audio_path = temp_path / "audio.wav"
+                    try:
+                        download_audio(video_path_or_url, audio_path)
+                    except DownloaderError as e:
+                        console.print(f"[red]yt-dlp error: {e}[/red]")
+                        update_video_stage(video_id, "transcribed", str(e))
+                        update_video_status(video_id, "failed")
+                        raise typer.Exit(code=1)
+
+                    transcript_data = _do_transcribe(
+                        video_id, str(audio_path), use_mock_asr, model, device, language, model_dir, force, resume
+                    )
+        else:
+            duration = get_video_duration(video_path_or_url)
+            update_video_duration(video_id, duration)
+
+            audio_path = Path(tempfile.gettempdir()) / f"video_summarizer_{video_id}.wav"
+            if Path(audio_path).exists() and not force:
+                console.print(f"[green]Using cached audio: {audio_path}[/green]")
+                logger.info(f"Using cached audio for video {video_id}")
+            else:
+                console.print("[cyan]Extracting audio...[/cyan]")
+                logger.info(f"Extracting audio for video {video_id}")
+                try:
+                    extract_audio(video_path_or_url, str(audio_path))
+                except FFmpegError as e:
+                    console.print(f"[red]FFmpeg error: {e}[/red]")
+                    update_video_stage(video_id, "audio_extracted", str(e))
+                    update_video_status(video_id, "failed")
+                    raise typer.Exit(code=1)
+
+            transcript_data = _do_transcribe(
+                video_id, str(audio_path), use_mock_asr, model, device, language, model_dir, force, resume
+            )
+
+        if audio_path and not keep_audio and not is_url:
+            audio_path.unlink(missing_ok=True)
+
+        if has_summary_chunks(video_id) and not force:
+            console.print(f"[green]Using existing summary chunks for video {video_id}[/green]")
+            logger.info(f"Using existing summary chunks for video {video_id}")
+            result_chunks = get_summary_chunks(video_id)
+        else:
+            console.print("[cyan]Summarizing video...[/cyan]")
+            logger.info(f"Generating summaries for video {video_id}")
+            update_video_stage(video_id, "chunked")
+            result = summarize_video_pipeline(
+                video_id,
+                llm_provider=llm_provider,
+                chunk_min=chunk_min,
+                chunk_max=chunk_max
+            )
+            result_chunks = result["chunks"]
+
+        video_title = get_video_info(video_id).get('title', 'Untitled') if not is_url else info.title
+
+        update_video_stage(video_id, "exported")
+
+        md_path = export_markdown(
+            video_id=video_id,
+            video_title=video_title,
+            transcript=transcript_data,
+            chunk_summaries=result_chunks,
+            final_summary=get_final_summary(video_id),
+            output_dir=output_dir
+        )
+        json_path = export_json(
+            video_id=video_id,
+            video_title=video_title,
+            video_url=video_path_or_url if is_url else None,
+            video_author=info.author if is_url else None,
+            duration=info.duration if is_url else duration,
+            transcript=transcript_data,
+            chunk_summaries=result_chunks,
+            final_summary=get_final_summary(video_id),
+            output_dir=output_dir
+        )
+        srt_path = export_srt(transcript_data, output_dir / f"{video_title[:50]}.srt")
+
+        update_video_outputs(video_id, md_path, json_path, srt_path)
+        update_video_status(video_id, "completed", "exported")
+
+        logger.info(f"Pipeline completed for video {video_id}")
+        logger.info(f"Outputs: {md_path}, {json_path}, {srt_path}")
+
+        console.print(f"[green]Done! Video ID: {video_id}[/green]")
+        console.print(f"[green]Markdown: {md_path}[/green]")
+        console.print(f"[green]JSON: {json_path}[/green]")
+        console.print(f"[green]SRT: {srt_path}[/green]")
+
+    except Exception as e:
+        logger.error(f"Pipeline failed: {e}", exc_info=True)
+        console.print(f"[red]Error: {e}[/red]")
+        import traceback
+        console.print(f"[dim]{traceback.format_exc()}[/dim]")
+        raise typer.Exit(code=1)
+
+
+def _do_transcribe(video_id, audio_path, use_mock_asr, model, device, language, model_dir, force, resume):
+    has_existing = has_transcript_segments(video_id)
+
+    if has_existing and resume and not force:
+        console.print(f"[green]Using existing transcript for video {video_id} (use --force to re-transcribe)[/green]")
+        logger.info(f"Using existing transcript for video {video_id}")
+        return get_transcript(video_id)
+
+    if has_existing and force:
+        console.print(f"[yellow]Clearing existing transcript for video {video_id}[/yellow]")
+        logger.info(f"Clearing existing transcript for video {video_id} (--force)")
+        clear_transcript_segments(video_id)
+
+    console.print("[cyan]Transcribing audio...[/cyan]")
+    logger.info(f"Transcribing audio for video {video_id}")
+    update_video_stage(video_id, "audio_extracted")
+
+    try:
+        engine = FasterWhisperEngine(
+            model_name=model,
+            device=device,
+            compute_type="float16" if device == "cuda" else "int8",
+            use_mock=use_mock_asr,
+            model_dir=model_dir,
+            language=language
+        )
+        segments = engine.transcribe(audio_path, language=language)
+        transcript_data = [
+            {"start": s.start, "end": s.end, "text": s.text, "source": "mock" if use_mock_asr else "asr"}
+            for s in segments
+        ]
+        save_transcript(video_id, transcript_data)
+        update_video_stage(video_id, "transcribed")
+        logger.info(f"Transcription complete for video {video_id}: {len(segments)} segments")
+        return transcript_data
+
+    except FasterWhisperError as e:
+        console.print(f"[red]ASR error: {e}[/red]")
+        update_video_stage(video_id, "transcribed", str(e))
+        update_video_status(video_id, "failed")
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def summarize_local(
     video_path: str = typer.Argument(..., help="本地视频文件路径"),
@@ -88,114 +511,25 @@ def summarize_local(
     language: Optional[str] = typer.Option(None, "--language", "-l", help="Language: zh, en, auto"),
     model_dir: Optional[str] = typer.Option(None, "--model-dir", help="Local model cache directory"),
     keep_audio: bool = typer.Option(False, "--keep-audio", help="Keep extracted audio file"),
-    force_transcribe: bool = typer.Option(False, "--force", help="Force re-transcribe even if transcript exists"),
+    resume: bool = typer.Option(True, "--resume/--no-resume", help="Resume from existing checkpoint (default: true)"),
+    force: bool = typer.Option(False, "--force", help="Force re-transcribe even if transcript exists"),
 ):
-    video_path = Path(video_path)
-    if not video_path.exists():
-        console.print(f"[red]Error: Video file not found: {video_path}[/red]")
-        raise typer.Exit(code=1)
-
-    use_mock_asr = asr_provider.lower() == "mock"
-    check_dependencies(require_asr=not use_mock_asr)
-
-    output_dir = Path(output) if output else settings.OUTPUT_DIR
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    try:
-        console.print(f"[cyan]Processing local video: {video_path.name}[/cyan]")
-        if use_mock_asr:
-            console.print(f"[yellow]Using Mock ASR (--asr-provider mock)[/yellow]")
-
-        video_id = create_video_record(
-            source_type="local",
-            source_path=str(video_path),
-            title=video_path.stem
-        )
-
-        duration = get_video_duration(str(video_path))
-        update_video_duration(video_id, duration)
-
-        console.print("[cyan]Extracting audio...[/cyan]")
-        audio_path = Path(tempfile.gettempdir()) / f"video_summarizer_{video_id}.wav"
-        try:
-            extract_audio(str(video_path), str(audio_path))
-        except FFmpegError as e:
-            console.print(f"[red]FFmpeg error: {e}[/red]")
-            update_video_status(video_id, "failed")
-            raise typer.Exit(code=1)
-
-        existing_transcript = get_transcript(video_id)
-        if existing_transcript and not force_transcribe:
-            console.print(f"[green]Using existing transcript for video {video_id}[/green]")
-            transcript_data = existing_transcript
-        else:
-            console.print("[cyan]Transcribing audio...[/cyan]")
-            try:
-                engine = FasterWhisperEngine(
-                    model_name=model,
-                    device=device,
-                    compute_type="float16" if device == "cuda" else "int8",
-                    use_mock=use_mock_asr,
-                    model_dir=model_dir,
-                    language=language
-                )
-                segments = engine.transcribe(str(audio_path), language=language)
-                transcript_data = [
-                    {"start": s.start, "end": s.end, "text": s.text, "source": "mock" if use_mock_asr else "asr"}
-                    for s in segments
-                ]
-                save_transcript(video_id, transcript_data)
-            except FasterWhisperError as e:
-                console.print(f"[red]ASR error: {e}[/red]")
-                update_video_status(video_id, "failed")
-                if not keep_audio:
-                    audio_path.unlink(missing_ok=True)
-                raise typer.Exit(code=1)
-
-        if not keep_audio:
-            audio_path.unlink(missing_ok=True)
-
-        console.print("[cyan]Summarizing video...[/cyan]")
-        result = summarize_video_pipeline(
-            video_id,
-            llm_provider=llm_provider,
-            chunk_min=chunk_min,
-            chunk_max=chunk_max
-        )
-
-        md_path = export_markdown(
-            video_id=video_id,
-            video_title=video_path.stem,
-            transcript=transcript_data,
-            chunk_summaries=result["chunks"],
-            final_summary=result["final_summary"],
-            output_dir=output_dir
-        )
-        json_path = export_json(
-            video_id=video_id,
-            video_title=video_path.stem,
-            video_url=None,
-            video_author=None,
-            duration=duration,
-            transcript=transcript_data,
-            chunk_summaries=result["chunks"],
-            final_summary=result["final_summary"],
-            output_dir=output_dir
-        )
-        srt_path = export_srt(transcript_data, output_dir / f"{video_path.stem}.srt")
-
-        console.print(f"[green]Done! Video ID: {video_id}[/green]")
-        console.print(f"[green]Markdown: {md_path}[/green]")
-        console.print(f"[green]JSON: {json_path}[/green]")
-        console.print(f"[green]SRT: {srt_path}[/green]")
-
-        update_video_status(video_id, "completed")
-
-    except Exception as e:
-        console.print(f"[red]Error: {e}[/red]")
-        import traceback
-        console.print(f"[dim]{traceback.format_exc()}[/dim]")
-        raise typer.Exit(code=1)
+    _run_summarize(
+        video_path_or_url=video_path,
+        is_url=False,
+        llm_provider=llm_provider,
+        asr_provider=asr_provider,
+        chunk_min=chunk_min,
+        chunk_max=chunk_max,
+        output=output,
+        model=model,
+        device=device,
+        language=language,
+        model_dir=model_dir,
+        keep_audio=keep_audio,
+        force=force,
+        resume=resume
+    )
 
 
 @app.command()
@@ -211,124 +545,25 @@ def summarize_url(
     language: Optional[str] = typer.Option(None, "--language", "-l", help="Language: zh, en, auto"),
     model_dir: Optional[str] = typer.Option(None, "--model-dir", help="Local model cache directory"),
     keep_audio: bool = typer.Option(False, "--keep-audio", help="Keep downloaded audio file"),
+    resume: bool = typer.Option(True, "--resume/--no-resume", help="Resume from existing checkpoint (default: true)"),
+    force: bool = typer.Option(False, "--force", help="Force re-transcribe even if transcript exists"),
 ):
-    use_mock_asr = asr_provider.lower() == "mock"
-    check_dependencies(require_asr=not use_mock_asr)
-
-    output_dir = Path(output) if output else settings.OUTPUT_DIR
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    try:
-        console.print(f"[cyan]Processing URL: {url}[/cyan]")
-        if use_mock_asr:
-            console.print(f"[yellow]Using Mock ASR (--asr-provider mock)[/yellow]")
-
-        console.print("[cyan]Fetching video info...[/cyan]")
-        try:
-            info = get_video_info(url)
-        except DownloaderError as e:
-            console.print(f"[red]yt-dlp error: {e}[/red]")
-            raise typer.Exit(code=1)
-
-        video_id = create_video_record(
-            source_type="url",
-            url=url,
-            title=info.title,
-            author=info.author,
-            duration=info.duration
-        )
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
-
-            srt_path = download_subtitles(url, temp_path)
-            if srt_path and srt_path.exists():
-                console.print(f"[green]Found subtitles: {srt_path}[/green]")
-                console.print("[cyan]Parsing subtitles...[/cyan]")
-                subtitle_segments = parse_srt(str(srt_path))
-                transcript_data = [
-                    {"start": s.start, "end": s.end, "text": s.text, "source": "subtitle"}
-                    for s in subtitle_segments
-                ]
-                save_transcript(video_id, transcript_data)
-            else:
-                console.print("[yellow]No subtitles found, downloading audio for ASR...[/yellow]")
-
-                audio_path = temp_path / "audio.wav"
-                try:
-                    download_audio(url, audio_path)
-                except DownloaderError as e:
-                    console.print(f"[red]yt-dlp error: {e}[/red]")
-                    update_video_status(video_id, "failed")
-                    raise typer.Exit(code=1)
-
-                console.print("[cyan]Transcribing audio...[/cyan]")
-                try:
-                    engine = FasterWhisperEngine(
-                        model_name=model,
-                        device=device,
-                        compute_type="float16" if device == "cuda" else "int8",
-                        use_mock=use_mock_asr,
-                        model_dir=model_dir,
-                        language=language
-                    )
-                    segments = engine.transcribe(str(audio_path), language=language)
-                    transcript_data = [
-                        {"start": s.start, "end": s.end, "text": s.text, "source": "mock" if use_mock_asr else "asr"}
-                        for s in segments
-                    ]
-                    save_transcript(video_id, transcript_data)
-                except FasterWhisperError as e:
-                    console.print(f"[red]ASR error: {e}[/red]")
-                    update_video_status(video_id, "failed")
-                    raise typer.Exit(code=1)
-                finally:
-                    if not keep_audio:
-                        audio_path.unlink(missing_ok=True)
-
-        console.print("[cyan]Summarizing video...[/cyan]")
-        result = summarize_video_pipeline(
-            video_id,
-            llm_provider=llm_provider,
-            chunk_min=chunk_min,
-            chunk_max=chunk_max
-        )
-
-        safe_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in info.title)[:50]
-
-        md_path = export_markdown(
-            video_id=video_id,
-            video_title=info.title,
-            transcript=transcript_data,
-            chunk_summaries=result["chunks"],
-            final_summary=result["final_summary"],
-            output_dir=output_dir
-        )
-        json_path = export_json(
-            video_id=video_id,
-            video_title=info.title,
-            video_url=url,
-            video_author=info.author,
-            duration=info.duration,
-            transcript=transcript_data,
-            chunk_summaries=result["chunks"],
-            final_summary=result["final_summary"],
-            output_dir=output_dir
-        )
-        srt_path = export_srt(transcript_data, output_dir / f"{safe_title}.srt")
-
-        console.print(f"[green]Done! Video ID: {video_id}[/green]")
-        console.print(f"[green]Markdown: {md_path}[/green]")
-        console.print(f"[green]JSON: {json_path}[/green]")
-        console.print(f"[green]SRT: {srt_path}[/green]")
-
-        update_video_status(video_id, "completed")
-
-    except Exception as e:
-        console.print(f"[red]Error: {e}[/red]")
-        import traceback
-        console.print(f"[dim]{traceback.format_exc()}[/dim]")
-        raise typer.Exit(code=1)
+    _run_summarize(
+        video_path_or_url=url,
+        is_url=True,
+        llm_provider=llm_provider,
+        asr_provider=asr_provider,
+        chunk_min=chunk_min,
+        chunk_max=chunk_max,
+        output=output,
+        model=model,
+        device=device,
+        language=language,
+        model_dir=model_dir,
+        keep_audio=keep_audio,
+        force=force,
+        resume=resume
+    )
 
 
 @app.command()
@@ -342,6 +577,7 @@ def transcribe(
     language: Optional[str] = typer.Option(None, "--language", "-l", help="Language: zh, en, auto"),
     model_dir: Optional[str] = typer.Option(None, "--model-dir", help="Local model cache directory"),
     keep_audio: bool = typer.Option(False, "--keep-audio", help="Keep extracted audio file"),
+    resume: bool = typer.Option(True, "--resume/--no-resume", help="Resume from existing checkpoint (default: true)"),
     force: bool = typer.Option(False, "--force", "-F", help="Force re-transcribe"),
 ):
     video_path = Path(video_path)
@@ -363,45 +599,9 @@ def transcribe(
             title=video_path.stem
         )
 
-        existing_transcript = get_transcript(video_id)
-        if existing_transcript and not force:
-            console.print(f"[green]Using existing transcript for video {video_id}[/green]")
-            transcript_data = existing_transcript
-        else:
-            console.print("[cyan]Extracting audio...[/cyan]")
-            audio_path = Path(tempfile.gettempdir()) / f"video_summarizer_{video_id}.wav"
-
-            try:
-                extract_audio(str(video_path), str(audio_path))
-            except FFmpegError as e:
-                console.print(f"[red]FFmpeg error: {e}[/red]")
-                update_video_status(video_id, "failed")
-                raise typer.Exit(code=1)
-
-            console.print("[cyan]Transcribing audio...[/cyan]")
-            try:
-                engine = FasterWhisperEngine(
-                    model_name=model,
-                    device=device,
-                    compute_type="float16" if device == "cuda" else "int8",
-                    use_mock=use_mock_asr,
-                    model_dir=model_dir,
-                    language=language
-                )
-                segments = engine.transcribe(str(audio_path), language=language)
-                transcript_data = [
-                    {"start": s.start, "end": s.end, "text": s.text, "source": "mock" if use_mock_asr else "asr"}
-                    for s in segments
-                ]
-            except FasterWhisperError as e:
-                console.print(f"[red]ASR error: {e}[/red]")
-                update_video_status(video_id, "failed")
-                raise typer.Exit(code=1)
-            finally:
-                if not keep_audio:
-                    audio_path.unlink(missing_ok=True)
-
-            save_transcript(video_id, transcript_data)
+        transcript_data = _do_transcribe(
+            video_id, str(video_path), use_mock_asr, model, device, language, model_dir, force, resume
+        )
 
         if output is None:
             settings.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -450,16 +650,10 @@ def export_cmd(
     format: str = typer.Option("markdown", "--format", "-f", help="Export format: markdown, srt, json"),
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file/directory path"),
 ):
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM videos WHERE id = ?", (video_id,))
-        video = cursor.fetchone()
-
-        if not video:
-            console.print(f"[red]Error: Video not found: {video_id}[/red]")
-            raise typer.Exit(code=1)
-
-        video = dict(video)
+    info = get_video_info(video_id)
+    if not info:
+        console.print(f"[red]Error: Video not found: {video_id}[/red]")
+        raise typer.Exit(code=1)
 
     transcript = get_transcript(video_id)
     chunk_summaries = get_summary_chunks(video_id)
@@ -472,7 +666,7 @@ def export_cmd(
         if format == "markdown":
             output_path = export_markdown(
                 video_id=video_id,
-                video_title=video["title"] or "Untitled",
+                video_title=info["title"] or "Untitled",
                 transcript=transcript,
                 chunk_summaries=chunk_summaries,
                 final_summary=final_summary,
@@ -486,10 +680,10 @@ def export_cmd(
         elif format == "json":
             output_path = export_json(
                 video_id=video_id,
-                video_title=video["title"] or "Untitled",
-                video_url=video["url"],
-                video_author=video["author"],
-                duration=video["duration"],
+                video_title=info["title"] or "Untitled",
+                video_url=info["url"],
+                video_author=info["author"],
+                duration=info["duration"],
                 transcript=transcript,
                 chunk_summaries=chunk_summaries,
                 final_summary=final_summary,
@@ -509,42 +703,44 @@ def export_cmd(
 
 @app.command("list")
 def list_videos(
-    status: Optional[str] = typer.Option(None, "--status", help="Filter by status: pending, processing, transcribed, completed, failed"),
+    status_filter: Optional[str] = typer.Option(None, "--status", help="Filter by status: pending, processing, transcribed, completed, failed"),
 ):
-    with get_db() as conn:
-        cursor = conn.cursor()
-        if status:
-            cursor.execute("SELECT * FROM videos WHERE status = ? ORDER BY created_at DESC", (status,))
-        else:
-            cursor.execute("SELECT * FROM videos ORDER BY created_at DESC")
-        videos = cursor.fetchall()
+    videos = get_all_videos()
 
-        if not videos:
-            console.print("[yellow]No videos found.[/yellow]")
-            return
+    if status_filter:
+        videos = [v for v in videos if v.get('status') == status_filter]
 
-        table = Table(title="Videos")
-        table.add_column("ID", style="cyan")
-        table.add_column("Title", style="green")
-        table.add_column("Source", style="blue")
-        table.add_column("Status", style="yellow")
-        table.add_column("Created", style="dim")
+    if not videos:
+        console.print("[yellow]No videos found.[/yellow]")
+        return
 
-        for v in videos:
-            status_style = "yellow"
-            if v["status"] == "completed":
-                status_style = "green"
-            elif v["status"] == "failed":
-                status_style = "red"
-            table.add_row(
-                str(v["id"]),
-                (v["title"] or "Untitled")[:40],
-                v["source_type"],
-                f"[{status_style}]{v['status']}[/{status_style}]",
-                v["created_at"][:19] if v["created_at"] else ""
-            )
+    table = Table(title="Videos")
+    table.add_column("ID", style="cyan")
+    table.add_column("Title", style="green")
+    table.add_column("Source", style="blue")
+    table.add_column("Status", style="yellow")
+    table.add_column("Stage", style="dim")
+    table.add_column("Created", style="dim")
 
-        console.print(table)
+    for v in videos:
+        status_style = {
+            'completed': 'green',
+            'failed': 'red',
+            'processing': 'cyan',
+            'transcribed': 'blue',
+            'pending': 'yellow'
+        }.get(v.get('status', ''), 'yellow')
+
+        table.add_row(
+            str(v["id"]),
+            (v["title"] or "Untitled")[:30],
+            v["source_type"],
+            f"[{status_style}]{v['status']}[/{status_style}]",
+            v.get('current_stage', '')[:15],
+            v["created_at"][:10] if v.get("created_at") else ""
+        )
+
+    console.print(table)
 
 
 def create_video_record(
@@ -558,8 +754,8 @@ def create_video_record(
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO videos (source_type, source_path, url, title, author, duration, status)
-            VALUES (?, ?, ?, ?, ?, ?, 'processing')
+            INSERT INTO videos (source_type, source_path, url, title, author, duration, status, current_stage)
+            VALUES (?, ?, ?, ?, ?, ?, 'processing', 'created')
         """, (source_type, source_path, url, title, author, duration))
         return cursor.lastrowid
 
@@ -568,13 +764,6 @@ def update_video_duration(video_id: int, duration: float):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("UPDATE videos SET duration = ? WHERE id = ?", (duration, video_id))
-        conn.commit()
-
-
-def update_video_status(video_id: int, status: str):
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE videos SET status = ? WHERE id = ?", (status, video_id))
         conn.commit()
 
 
