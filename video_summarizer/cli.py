@@ -1,4 +1,5 @@
 import sys
+import os
 from pathlib import Path
 from typing import Optional
 import tempfile
@@ -6,15 +7,16 @@ import tempfile
 import typer
 from rich.console import Console
 from rich.table import Table
+from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from .config import settings
 from .db import get_db, init_db
 from .models import Video
 from .media.ffmpeg import extract_audio, get_video_duration, check_ffmpeg_installed, FFmpegError
 from .media.downloader import download_audio, download_subtitles, get_video_info, check_ytdlp_installed, DownloaderError
-from .asr.faster_whisper_engine import FasterWhisperEngine, FasterWhisperError
+from .asr.faster_whisper_engine import FasterWhisperEngine, FasterWhisperError, Segment
 from .asr.subtitle_parser import parse_srt
-from .summarizer.pipeline import summarize_video_pipeline, get_transcript, get_summary_chunks, get_final_summary
+from .summarizer.pipeline import summarize_video_pipeline, get_transcript, get_summary_chunks, get_final_summary, save_transcript
 from .exporters.markdown import export_markdown
 from .exporters.srt import export_srt
 from .exporters.json_exporter import export_json
@@ -48,12 +50,32 @@ def main():
     init_db()
 
 
+@app.command("download-model")
+def download_model(
+    model: str = typer.Option("base", "--model", "-m", help="Whisper model to download: tiny, base, small, medium, large"),
+):
+    console.print(f"[cyan]Downloading Whisper model: {model}[/cyan]")
+    try:
+        engine = FasterWhisperEngine(model_name=model)
+        _ = engine.model
+        console.print(f"[green]Model {model} downloaded successfully![/green]")
+    except Exception as e:
+        console.print(f"[red]Failed to download model: {e}[/red]")
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def summarize_local(
     video_path: str = typer.Argument(..., help="本地视频文件路径"),
     llm_provider: str = typer.Option("mock", "--llm-provider", help="LLM provider: mock, openai, ollama"),
     chunk_min: int = typer.Option(3, "--chunk-min", help="Minimum chunk duration in minutes"),
     chunk_max: int = typer.Option(5, "--chunk-max", help="Maximum chunk duration in minutes"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output directory"),
+    model: str = typer.Option("base", "--model", help="Whisper model: tiny, base, small, medium, large"),
+    device: str = typer.Option("cpu", "--device", help="Device: cpu, cuda"),
+    language: Optional[str] = typer.Option(None, "--language", "-l", help="Language: zh, en, auto"),
+    keep_audio: bool = typer.Option(False, "--keep-audio", help="Keep extracted audio file"),
+    force_transcribe: bool = typer.Option(False, "--force", help="Force re-transcribe even if transcript exists"),
 ):
     video_path = Path(video_path)
     if not video_path.exists():
@@ -61,6 +83,9 @@ def summarize_local(
         raise typer.Exit(code=1)
 
     check_dependencies()
+
+    output_dir = Path(output) if output else settings.OUTPUT_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         console.print(f"[cyan]Processing local video: {video_path.name}[/cyan]")
@@ -75,26 +100,41 @@ def summarize_local(
         update_video_duration(video_id, duration)
 
         console.print("[cyan]Extracting audio...[/cyan]")
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            audio_path = f.name
-
+        audio_path = Path(tempfile.gettempdir()) / f"video_summarizer_{video_id}.wav"
         try:
-            extract_audio(str(video_path), audio_path)
+            extract_audio(str(video_path), str(audio_path))
         except FFmpegError as e:
             console.print(f"[red]FFmpeg error: {e}[/red]")
             update_video_status(video_id, "failed")
             raise typer.Exit(code=1)
 
-        console.print("[cyan]Transcribing audio...[/cyan]")
-        engine = FasterWhisperEngine()
-        segments = engine.transcribe(audio_path)
+        existing_transcript = get_transcript(video_id)
+        if existing_transcript and not force_transcribe:
+            console.print(f"[green]Using existing transcript for video {video_id}[/green]")
+            transcript_data = existing_transcript
+        else:
+            console.print("[cyan]Transcribing audio...[/cyan]")
+            try:
+                engine = FasterWhisperEngine(
+                    model_name=model,
+                    device=device,
+                    compute_type="float16" if device == "cuda" else "int8"
+                )
+                segments = engine.transcribe(str(audio_path), language=language)
+                transcript_data = [
+                    {"start": s.start, "end": s.end, "text": s.text, "source": "asr"}
+                    for s in segments
+                ]
+                save_transcript(video_id, transcript_data)
+            except FasterWhisperError as e:
+                console.print(f"[red]Whisper error: {e}[/red]")
+                update_video_status(video_id, "failed")
+                if not keep_audio:
+                    audio_path.unlink(missing_ok=True)
+                raise typer.Exit(code=1)
 
-        transcript_data = [
-            {"start": s.start, "end": s.end, "text": s.text, "source": "asr"}
-            for s in segments
-        ]
-        from .summarizer.pipeline import save_transcript
-        save_transcript(video_id, transcript_data)
+        if not keep_audio:
+            audio_path.unlink(missing_ok=True)
 
         console.print("[cyan]Summarizing video...[/cyan]")
         result = summarize_video_pipeline(
@@ -104,19 +144,38 @@ def summarize_local(
             chunk_max=chunk_max
         )
 
-        output_path = export_markdown(
+        md_path = export_markdown(
             video_id=video_id,
             video_title=video_path.stem,
             transcript=transcript_data,
             chunk_summaries=result["chunks"],
-            final_summary=result["final_summary"]
+            final_summary=result["final_summary"],
+            output_dir=output_dir
         )
+        json_path = export_json(
+            video_id=video_id,
+            video_title=video_path.stem,
+            video_url=None,
+            video_author=None,
+            duration=duration,
+            transcript=transcript_data,
+            chunk_summaries=result["chunks"],
+            final_summary=result["final_summary"],
+            output_dir=output_dir
+        )
+        srt_path = export_srt(transcript_data, output_dir / f"{video_path.stem}.srt")
 
-        console.print(f"[green]Done! Output saved to: {output_path}[/green]")
-        console.print(f"[green]Video ID: {video_id}[/green]")
+        console.print(f"[green]Done! Video ID: {video_id}[/green]")
+        console.print(f"[green]Markdown: {md_path}[/green]")
+        console.print(f"[green]JSON: {json_path}[/green]")
+        console.print(f"[green]SRT: {srt_path}[/green]")
+
+        update_video_status(video_id, "completed")
 
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
+        import traceback
+        console.print(f"[dim]{traceback.format_exc()}[/dim]")
         raise typer.Exit(code=1)
 
 
@@ -126,8 +185,16 @@ def summarize_url(
     llm_provider: str = typer.Option("mock", "--llm-provider", help="LLM provider: mock, openai, ollama"),
     chunk_min: int = typer.Option(3, "--chunk-min", help="Minimum chunk duration in minutes"),
     chunk_max: int = typer.Option(5, "--chunk-max", help="Maximum chunk duration in minutes"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output directory"),
+    model: str = typer.Option("base", "--model", help="Whisper model: tiny, base, small, medium, large"),
+    device: str = typer.Option("cpu", "--device", help="Device: cpu, cuda"),
+    language: Optional[str] = typer.Option(None, "--language", "-l", help="Language: zh, en, auto"),
+    keep_audio: bool = typer.Option(False, "--keep-audio", help="Keep downloaded audio file"),
 ):
     check_dependencies()
+
+    output_dir = Path(output) if output else settings.OUTPUT_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         console.print(f"[cyan]Processing URL: {url}[/cyan]")
@@ -159,7 +226,6 @@ def summarize_url(
                     {"start": s.start, "end": s.end, "text": s.text, "source": "subtitle"}
                     for s in subtitle_segments
                 ]
-                from .summarizer.pipeline import save_transcript
                 save_transcript(video_id, transcript_data)
             else:
                 console.print("[yellow]No subtitles found, downloading audio for ASR...[/yellow]")
@@ -173,14 +239,25 @@ def summarize_url(
                     raise typer.Exit(code=1)
 
                 console.print("[cyan]Transcribing audio...[/cyan]")
-                engine = FasterWhisperEngine()
-                segments = engine.transcribe(str(audio_path))
-                transcript_data = [
-                    {"start": s.start, "end": s.end, "text": s.text, "source": "asr"}
-                    for s in segments
-                ]
-                from .summarizer.pipeline import save_transcript
-                save_transcript(video_id, transcript_data)
+                try:
+                    engine = FasterWhisperEngine(
+                        model_name=model,
+                        device=device,
+                        compute_type="float16" if device == "cuda" else "int8"
+                    )
+                    segments = engine.transcribe(str(audio_path), language=language)
+                    transcript_data = [
+                        {"start": s.start, "end": s.end, "text": s.text, "source": "asr"}
+                        for s in segments
+                    ]
+                    save_transcript(video_id, transcript_data)
+                except FasterWhisperError as e:
+                    console.print(f"[red]Whisper error: {e}[/red]")
+                    update_video_status(video_id, "failed")
+                    raise typer.Exit(code=1)
+                finally:
+                    if not keep_audio:
+                        audio_path.unlink(missing_ok=True)
 
         console.print("[cyan]Summarizing video...[/cyan]")
         result = summarize_video_pipeline(
@@ -190,19 +267,40 @@ def summarize_url(
             chunk_max=chunk_max
         )
 
-        output_path = export_markdown(
+        safe_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in info.title)[:50]
+
+        md_path = export_markdown(
             video_id=video_id,
             video_title=info.title,
             transcript=transcript_data,
             chunk_summaries=result["chunks"],
-            final_summary=result["final_summary"]
+            final_summary=result["final_summary"],
+            output_dir=output_dir
         )
+        json_path = export_json(
+            video_id=video_id,
+            video_title=info.title,
+            video_url=url,
+            video_author=info.author,
+            duration=info.duration,
+            transcript=transcript_data,
+            chunk_summaries=result["chunks"],
+            final_summary=result["final_summary"],
+            output_dir=output_dir
+        )
+        srt_path = export_srt(transcript_data, output_dir / f"{safe_title}.srt")
 
-        console.print(f"[green]Done! Output saved to: {output_path}[/green]")
-        console.print(f"[green]Video ID: {video_id}[/green]")
+        console.print(f"[green]Done! Video ID: {video_id}[/green]")
+        console.print(f"[green]Markdown: {md_path}[/green]")
+        console.print(f"[green]JSON: {json_path}[/green]")
+        console.print(f"[green]SRT: {srt_path}[/green]")
+
+        update_video_status(video_id, "completed")
 
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
+        import traceback
+        console.print(f"[dim]{traceback.format_exc()}[/dim]")
         raise typer.Exit(code=1)
 
 
@@ -210,7 +308,12 @@ def summarize_url(
 def transcribe(
     video_path: str = typer.Argument(..., help="本地视频文件路径"),
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file path"),
-    format: str = typer.Option("srt", "--format", "-f", help="Output format: srt, json, txt"),
+    format: str = typer.Option("json", "--format", "-f", help="Output format: srt, json, txt"),
+    model: str = typer.Option("base", "--model", help="Whisper model: tiny, base, small, medium, large"),
+    device: str = typer.Option("cpu", "--device", help="Device: cpu, cuda"),
+    language: Optional[str] = typer.Option(None, "--language", "-l", help="Language: zh, en, auto"),
+    keep_audio: bool = typer.Option(False, "--keep-audio", help="Keep extracted audio file"),
+    force: bool = typer.Option(False, "--force", "-F", help="Force re-transcribe"),
 ):
     video_path = Path(video_path)
     if not video_path.exists():
@@ -228,28 +331,42 @@ def transcribe(
             title=video_path.stem
         )
 
-        console.print("[cyan]Extracting audio...[/cyan]")
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            audio_path = f.name
+        existing_transcript = get_transcript(video_id)
+        if existing_transcript and not force:
+            console.print(f"[green]Using existing transcript for video {video_id}[/green]")
+            transcript_data = existing_transcript
+        else:
+            console.print("[cyan]Extracting audio...[/cyan]")
+            audio_path = Path(tempfile.gettempdir()) / f"video_summarizer_{video_id}.wav"
 
-        try:
-            extract_audio(str(video_path), audio_path)
-        except FFmpegError as e:
-            console.print(f"[red]FFmpeg error: {e}[/red]")
-            update_video_status(video_id, "failed")
-            raise typer.Exit(code=1)
+            try:
+                extract_audio(str(video_path), str(audio_path))
+            except FFmpegError as e:
+                console.print(f"[red]FFmpeg error: {e}[/red]")
+                update_video_status(video_id, "failed")
+                raise typer.Exit(code=1)
 
-        console.print("[cyan]Transcribing audio...[/cyan]")
-        engine = FasterWhisperEngine()
-        segments = engine.transcribe(audio_path)
+            console.print("[cyan]Transcribing audio...[/cyan]")
+            try:
+                engine = FasterWhisperEngine(
+                    model_name=model,
+                    device=device,
+                    compute_type="float16" if device == "cuda" else "int8"
+                )
+                segments = engine.transcribe(str(audio_path), language=language)
+                transcript_data = [
+                    {"start": s.start, "end": s.end, "text": s.text, "source": "asr"}
+                    for s in segments
+                ]
+            except FasterWhisperError as e:
+                console.print(f"[red]Whisper error: {e}[/red]")
+                update_video_status(video_id, "failed")
+                raise typer.Exit(code=1)
+            finally:
+                if not keep_audio:
+                    audio_path.unlink(missing_ok=True)
 
-        transcript_data = [
-            {"start": s.start, "end": s.end, "text": s.text, "source": "asr"}
-            for s in segments
-        ]
-
-        from .summarizer.pipeline import save_transcript
-        save_transcript(video_id, transcript_data)
+            save_transcript(video_id, transcript_data)
 
         if output is None:
             settings.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -267,10 +384,12 @@ def transcribe(
                 transcript=transcript_data,
                 chunk_summaries=[],
                 final_summary=None,
-                output_path=output
+                output_dir=Path(output).parent,
+                output_filename=Path(output).name
             )
         else:
             output_path = output
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
             with open(output_path, "w", encoding="utf-8") as f:
                 for seg in transcript_data:
                     f.write(f"{seg['start']:.2f} - {seg['end']:.2f}: {seg['text']}\n\n")
@@ -279,16 +398,22 @@ def transcribe(
         console.print(f"[green]Done! Output saved to: {output_path}[/green]")
         console.print(f"[green]Video ID: {video_id}[/green]")
 
+        console.print(f"[dim]Transcript preview (first 3 segments):[/dim]")
+        for seg in transcript_data[:3]:
+            console.print(f"[dim]  {seg['start']:.2f} - {seg['end']:.2f}: {seg['text'][:50]}...[/dim]")
+
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
+        import traceback
+        console.print(f"[dim]{traceback.format_exc()}[/dim]")
         raise typer.Exit(code=1)
 
 
 @app.command()
-def export(
+def export_cmd(
     video_id: int = typer.Argument(..., help="视频ID"),
     format: str = typer.Option("markdown", "--format", "-f", help="Export format: markdown, srt, json"),
-    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file path"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file/directory path"),
 ):
     with get_db() as conn:
         cursor = conn.cursor()
@@ -316,7 +441,7 @@ def export(
                 transcript=transcript,
                 chunk_summaries=chunk_summaries,
                 final_summary=final_summary,
-                output_path=output
+                output_dir=Path(output) if output else None
             )
         elif format == "srt":
             if not transcript:
@@ -333,7 +458,8 @@ def export(
                 transcript=transcript,
                 chunk_summaries=chunk_summaries,
                 final_summary=final_summary,
-                output_path=output
+                output_dir=Path(output).parent if output else None,
+                output_filename=Path(output).name if output else None
             )
         else:
             console.print(f"[red]Error: Unknown format: {format}[/red]")
@@ -347,10 +473,15 @@ def export(
 
 
 @app.command("list")
-def list_videos():
+def list_videos(
+    status: Optional[str] = typer.Option(None, "--status", help="Filter by status: pending, processing, transcribed, completed, failed"),
+):
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM videos ORDER BY created_at DESC")
+        if status:
+            cursor.execute("SELECT * FROM videos WHERE status = ? ORDER BY created_at DESC", (status,))
+        else:
+            cursor.execute("SELECT * FROM videos ORDER BY created_at DESC")
         videos = cursor.fetchall()
 
         if not videos:
@@ -365,11 +496,16 @@ def list_videos():
         table.add_column("Created", style="dim")
 
         for v in videos:
+            status_style = "yellow"
+            if v["status"] == "completed":
+                status_style = "green"
+            elif v["status"] == "failed":
+                status_style = "red"
             table.add_row(
                 str(v["id"]),
-                v["title"][:40] if v["title"] else "Untitled",
+                (v["title"] or "Untitled")[:40],
                 v["source_type"],
-                v["status"],
+                f"[{status_style}]{v['status']}[/{status_style}]",
                 v["created_at"][:19] if v["created_at"] else ""
             )
 

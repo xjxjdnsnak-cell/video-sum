@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Union
 from datetime import datetime
 
 from ..config import settings
@@ -12,15 +12,21 @@ def export_markdown(
     transcript: List[Dict],
     chunk_summaries: List[Dict],
     final_summary: Dict,
-    output_path: Optional[str] = None
+    output_path: Optional[Union[str, Path]] = None,
+    output_dir: Optional[Union[str, Path]] = None
 ) -> str:
-    if output_path is None:
-        settings.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        safe_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in video_title)[:50]
-        output_path = settings.OUTPUT_DIR / f"{safe_title}_{video_id}.md"
-    else:
+    if output_path is not None:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+    elif output_dir is not None:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        safe_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in video_title)[:50]
+        output_path = output_dir / f"{safe_title}.md"
+    else:
+        settings.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        safe_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in video_title)[:50]
+        output_path = settings.OUTPUT_DIR / f"{safe_title}.md"
 
     lines = [
         f"# 视频总结：{video_title}",

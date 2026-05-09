@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Union
 from datetime import datetime
 
 
@@ -13,15 +13,26 @@ def export_json(
     transcript: List[Dict],
     chunk_summaries: List[Dict],
     final_summary: Optional[Dict],
-    output_path: Optional[str] = None
+    output_path: Optional[Union[str, Path]] = None,
+    output_dir: Optional[Union[str, Path]] = None,
+    output_filename: Optional[str] = None
 ) -> str:
-    if output_path is None:
-        from ..config import settings
-        settings.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        output_path = settings.OUTPUT_DIR / f"{video_id}_export.json"
-    else:
+    if output_path is not None:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+    elif output_dir is not None:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if output_filename:
+            output_path = output_dir / output_filename
+        else:
+            safe_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in video_title)[:50]
+            output_path = output_dir / f"{safe_title}.json"
+    else:
+        from ..config import settings
+        settings.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        safe_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in video_title)[:50]
+        output_path = settings.OUTPUT_DIR / f"{safe_title}.json"
 
     data = {
         "video_id": video_id,
