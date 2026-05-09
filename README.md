@@ -1,7 +1,7 @@
 # Video Summarizer
 
-> **版本**: v0.2.1-local-robustness
-> **目标**: 提升本地视频总结器的稳定性、断点续跑能力和可诊断性
+> **版本**: v0.3.0-bilibili-ingestion
+> **目标**: 增强 B站链接输入能力，让 summarize-url 在真实网络环境下更稳定
 
 B站/本地视频总结器 - 自动提取音频/字幕，转成文字，按时间戳分段，调用 LLM 生成摘要，最后导出 Markdown 笔记。
 
@@ -80,6 +80,104 @@ video-summarizer clean --all-cache --yes
 
 ---
 
+## B站视频处理
+
+### 1. 检查视频信息
+
+```bash
+video-summarizer inspect-url "BV1xx411c7mZ"
+video-summarizer inspect-url "https://www.bilibili.com/video/BV1xx411c7mZ"
+```
+
+显示：标题、UP主、时长、视频ID、分P数量、是否有字幕、可用字幕语言、是否需要登录等。
+
+### 2. 支持的链接格式
+
+- BV号: `BV1xx411c7mZ`
+- av号: `av12345678`
+- 完整链接: `https://www.bilibili.com/video/BV1xx411c7mZ`
+- 短链接: `https://b23.tv/BV1xx411c7mZ`
+
+### 3. 使用 Cookie 登录
+
+部分视频需要登录才能观看，可使用以下方式：
+
+```bash
+# 使用 Cookie 文件
+video-summarizer summarize-url "BV1xx411c7mZ" \
+  --cookies /path/to/cookies.txt \
+  --llm-provider mock
+
+# 从浏览器导入 Cookie
+video-summarizer summarize-url "BV1xx411c7mZ" \
+  --cookies-from-browser chrome \
+  --llm-provider mock
+```
+
+### 4. 字幕优先策略
+
+默认情况下，工具会：
+1. 先检查是否有官方字幕或自动字幕
+2. 如果有字幕，直接解析为文本（无需 ASR）
+3. 如果没有字幕，再下载音频并进行语音转写
+
+```bash
+# 只下载字幕（不进行 ASR）
+video-summarizer summarize-url "BV1xx411c7mZ" \
+  --download-subtitle-only \
+  --llm-provider mock
+
+# 只下载音频（不检查字幕）
+video-summarizer summarize-url "BV1xx411c7mZ" \
+  --download-audio-only \
+  --llm-provider mock
+```
+
+### 5. 代理支持
+
+```bash
+video-summarizer summarize-url "BV1xx411c7mZ" \
+  --proxy http://127.0.0.1:7890 \
+  --llm-provider mock
+```
+
+### 6. 如何导出 Cookie
+
+#### 方法一：使用浏览器扩展
+
+1. 安装 Cookie-Editor 扩展（Chrome/Firefox）
+2. 登录 B站
+3. 打开 Cookie-Editor
+4. 点击"导出" -> 选择"Netscape"格式
+5. 保存为 `cookies.txt`
+
+#### 方法二：手动导出
+
+```bash
+# 使用 yt-dlp 导出
+yt-dlp --cookies-from-browser chrome --dump-json "https://www.bilibili.com" > /dev/null
+# Cookie 会自动保存到 ~/.cache/yt-dlp/cookies/chrome.sqlite
+```
+
+### 7. B站链接失败的常见原因
+
+| 错误码 | 原因 | 解决方案 |
+|--------|------|----------|
+| HTTP 412 | 需要登录 | 使用 `--cookies` 或 `--cookies-from-browser` |
+| HTTP 403 | 访问被拒绝 | 检查视频权限，可能需要登录 |
+| 视频不存在 | 视频已删除或私密 | 检查链接是否正确 |
+| 地区限制 | 仅限特定地区观看 | 使用 `--proxy` 参数 |
+
+### 8. 重要声明
+
+本工具**不承诺**绕过版权和付费限制：
+- 仅用于个人学习和研究目的
+- 请遵守 B站用户协议和相关法律法规
+- 付费视频需要购买后才能观看
+- 版权保护的内容请获得授权后使用
+
+---
+
 ## 真实 ASR 转写（需网络环境）
 
 ```bash
@@ -137,6 +235,10 @@ video-summarizer transcribe ./test.mp4 \
 # 诊断
 video-summarizer doctor                    # 环境检查
 
+# B站工具
+video-summarizer inspect-url <URL/BV号>    # 检查视频信息
+video-summarizer summarize-url <URL/BV号>  # 总结 B站视频
+
 # 任务管理
 video-summarizer status <VIDEO_ID>        # 查看任务状态
 video-summarizer list                     # 列出所有视频
@@ -144,13 +246,25 @@ video-summarizer clean [选项]              # 清理缓存
 
 # 处理
 video-summarizer summarize-local <路径>    # 总结本地视频
-video-summarizer summarize-url <URL>       # 总结 B站链接
 video-summarizer transcribe <路径>         # 仅转写
 video-summarizer export <VIDEO_ID>         # 导出已有视频
 
 # 模型
 video-summarizer download-model           # 下载 Whisper 模型
 ```
+
+---
+
+## B站参数说明
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--cookies` | None | Cookie文件路径 (Netscape格式) |
+| `--cookies-from-browser` | None | 从浏览器导入Cookie: chrome/firefox/edge/brave/safari |
+| `--proxy` | None | 代理服务器地址 |
+| `--user-agent` | 默认UA | 自定义User-Agent |
+| `--download-subtitle-only` | False | 只下载字幕，不进行ASR |
+| `--download-audio-only` | False | 只下载音频，不检查字幕 |
 
 ---
 
@@ -222,7 +336,8 @@ pytest tests/ -v
 ## 当前版本限制
 
 - **真实 ASR**: 需要在有网络的环境中验证 Whisper 模型下载
-- **B站链接**: 部分视频需要登录 Cookie 才能访问
+- **B站链接**: 部分视频需要登录 Cookie 才能访问，建议使用 `--cookies` 或 `--cookies-from-browser` 参数
+- **付费视频**: 本工具不承诺绕过付费限制，付费内容需要购买后才能观看
 
 ---
 

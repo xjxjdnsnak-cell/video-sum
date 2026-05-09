@@ -19,7 +19,10 @@ from .db import (
     get_all_videos
 )
 from .media.ffmpeg import extract_audio, get_video_duration, check_ffmpeg_installed, FFmpegError
-from .media.downloader import download_audio, download_subtitles, get_video_info as get_url_info, check_ytdlp_installed, DownloaderError
+from .media.downloader import (
+    download_audio, download_subtitles, get_video_info as get_url_info, 
+    check_ytdlp_installed, DownloaderError, is_bilibili_url, normalize_bilibili_url
+)
 from .asr.faster_whisper_engine import FasterWhisperEngine, FasterWhisperError, Segment
 from .asr.subtitle_parser import parse_srt
 from .summarizer.pipeline import summarize_video_pipeline, get_transcript, get_summary_chunks, get_final_summary, save_transcript
@@ -108,6 +111,65 @@ def doctor():
     else:
         console.print("[bold yellow]Some checks failed. Please fix the issues above.[/bold yellow]")
         raise typer.Exit(code=1)
+
+
+@app.command("inspect-url")
+def inspect_url(
+    url: str = typer.Argument(..., help="B站视频链接或BV号"),
+    cookies: Optional[str] = typer.Option(None, "--cookies", help="Cookie文件路径"),
+    cookies_from_browser: Optional[str] = typer.Option(None, "--cookies-from-browser", 
+                                                      help="从浏览器导入Cookie: chrome/firefox/edge"),
+    proxy: Optional[str] = typer.Option(None, "--proxy", help="代理服务器地址"),
+    user_agent: Optional[str] = typer.Option(None, "--user-agent", help="自定义User-Agent"),
+):
+    if not is_bilibili_url(url):
+        console.print("[yellow]警告：这可能不是一个有效的B站链接[/yellow]")
+    
+    normalized_url = normalize_bilibili_url(url)
+    console.print(f"[cyan]正在检查: {normalized_url}[/cyan]")
+    console.print()
+
+    try:
+        info = get_url_info(
+            url,
+            cookies_file=cookies,
+            cookies_from_browser=cookies_from_browser,
+            proxy=proxy,
+            user_agent=user_agent
+        )
+    except DownloaderError as e:
+        console.print(f"[red]获取视频信息失败: {e}[/red]")
+        raise typer.Exit(code=1)
+
+    console.print(Panel("[bold cyan]视频信息[/bold cyan]", expand=False))
+    console.print()
+
+    console.print(f"[bold]标题:[/bold] {info.title}")
+    console.print(f"[bold]UP主:[/bold] {info.author or '未知'}")
+    console.print(f"[bold]时长:[/bold] {int(info.duration // 60)}分{int(info.duration % 60)}秒")
+    console.print(f"[bold]视频ID:[/bold] {info.video_id or '未知'}")
+    console.print(f"[bold]分P数量:[/bold] {info.page_count}")
+    console.print(f"[bold]需要登录:[/bold] {'[red]是[/red]' if info.requires_login else '[green]否[/green]'}")
+    
+    console.print()
+    console.print(f"[bold]字幕信息:[/bold]")
+    if info.subtitles:
+        console.print(f"  [green]✓[/green] 存在字幕")
+        console.print(f"  可用语言: {', '.join(info.subtitles.keys())}")
+    else:
+        console.print(f"  [yellow]✗[/yellow] 无字幕")
+        console.print(f"  将使用ASR进行语音转写")
+
+    console.print()
+    console.print(f"[bold]推荐命令:[/bold]")
+    cmd_parts = ["video-summarizer summarize-url", f"'{url}'", "--llm-provider mock"]
+    
+    if cookies:
+        cmd_parts.append(f"--cookies {cookies}")
+    elif info.requires_login:
+        console.print(f"[dim]视频需要登录，建议添加 --cookies 参数[/dim]")
+    
+    console.print(f"[green]{' '.join(cmd_parts)}[/green]")
 
 
 @app.command("status")
@@ -285,6 +347,12 @@ def _run_summarize(
     keep_audio: bool,
     force: bool,
     resume: bool = True,
+    cookies: Optional[str] = None,
+    cookies_from_browser: Optional[str] = None,
+    proxy: Optional[str] = None,
+    user_agent: Optional[str] = None,
+    download_subtitle_only: bool = False,
+    download_audio_only: bool = False,
 ):
     use_mock_asr = asr_provider.lower() == "mock"
     check_dependencies(require_asr=not use_mock_asr)
@@ -300,7 +368,13 @@ def _run_summarize(
 
             console.print("[cyan]Fetching video info...[/cyan]")
             try:
-                info = get_url_info(video_path_or_url)
+                info = get_url_info(
+                    video_path_or_url,
+                    cookies_file=cookies,
+                    cookies_from_browser=cookies_from_browser,
+                    proxy=proxy,
+                    user_agent=user_agent
+                )
             except DownloaderError as e:
                 console.print(f"[red]yt-dlp error: {e}[/red]")
                 raise typer.Exit(code=1)
@@ -313,6 +387,9 @@ def _run_summarize(
                 duration=info.duration
             )
             logger.info(f"Created video record {video_id} for URL: {video_path_or_url}")
+
+            if info.requires_login and not cookies and not cookies_from_browser:
+                console.print("[yellow]警告：视频可能需要登录才能访问。建议使用 --cookies 参数。[/yellow]")
 
         else:
             video_path = Path(video_path_or_url)
@@ -336,30 +413,49 @@ def _run_summarize(
 
         duration = None
         audio_path = None
+        transcript_data = None
 
         if is_url:
             with tempfile.TemporaryDirectory() as temp_dir:
                 temp_path = Path(temp_dir)
 
-                srt_path = download_subtitles(video_path_or_url, temp_path)
-                if srt_path and srt_path.exists():
-                    console.print(f"[green]Found subtitles: {srt_path}[/green]")
-                    logger.info(f"Found subtitles for video {video_id}")
-                    console.print("[cyan]Parsing subtitles...[/cyan]")
-                    subtitle_segments = parse_srt(str(srt_path))
-                    transcript_data = [
-                        {"start": s.start, "end": s.end, "text": s.text, "source": "subtitle"}
-                        for s in subtitle_segments
-                    ]
-                    save_transcript(video_id, transcript_data)
-                    update_video_stage(video_id, "transcribed")
-                else:
-                    console.print("[yellow]No subtitles found, downloading audio for ASR...[/yellow]")
-                    logger.info(f"No subtitles found for video {video_id}, downloading audio")
+                has_subtitles = False
+                if not download_audio_only:
+                    console.print("[cyan]Checking for subtitles...[/cyan]")
+                    srt_path = download_subtitles(
+                        video_path_or_url, temp_path,
+                        cookies_file=cookies,
+                        cookies_from_browser=cookies_from_browser,
+                        proxy=proxy,
+                        user_agent=user_agent
+                    )
+                    if srt_path and srt_path.exists():
+                        console.print(f"[green]✓ 找到字幕: {srt_path}[/green]")
+                        logger.info(f"Found subtitles for video {video_id}")
+                        console.print("[cyan]Parsing subtitles...[/cyan]")
+                        subtitle_segments = parse_srt(str(srt_path))
+                        transcript_data = [
+                            {"start": s.start, "end": s.end, "text": s.text, "source": "subtitle"}
+                            for s in subtitle_segments
+                        ]
+                        save_transcript(video_id, transcript_data)
+                        update_video_stage(video_id, "transcribed")
+                        has_subtitles = True
+                    else:
+                        console.print("[yellow]✗ 未找到字幕，将使用ASR[/yellow]")
+                        logger.info(f"No subtitles found for video {video_id}")
 
+                if not has_subtitles and not download_subtitle_only:
+                    console.print("[cyan]Downloading audio for ASR...[/cyan]")
                     audio_path = temp_path / "audio.wav"
                     try:
-                        download_audio(video_path_or_url, audio_path)
+                        download_audio(
+                            video_path_or_url, audio_path,
+                            cookies_file=cookies,
+                            cookies_from_browser=cookies_from_browser,
+                            proxy=proxy,
+                            user_agent=user_agent
+                        )
                     except DownloaderError as e:
                         console.print(f"[red]yt-dlp error: {e}[/red]")
                         update_video_stage(video_id, "transcribed", str(e))
@@ -369,6 +465,11 @@ def _run_summarize(
                     transcript_data = _do_transcribe(
                         video_id, str(audio_path), use_mock_asr, model, device, language, model_dir, force, resume
                     )
+
+                if download_subtitle_only and not has_subtitles:
+                    console.print("[red]错误：未找到字幕且指定了 --download-subtitle-only[/red]")
+                    raise typer.Exit(code=1)
+
         else:
             duration = get_video_duration(video_path_or_url)
             update_video_duration(video_id, duration)
@@ -394,6 +495,10 @@ def _run_summarize(
 
         if audio_path and not keep_audio and not is_url:
             audio_path.unlink(missing_ok=True)
+
+        if download_subtitle_only or download_audio_only:
+            console.print(f"[green]字幕提取完成! Video ID: {video_id}[/green]")
+            return
 
         if has_summary_chunks(video_id) and not force:
             console.print(f"[green]Using existing summary chunks for video {video_id}[/green]")
@@ -534,7 +639,7 @@ def summarize_local(
 
 @app.command()
 def summarize_url(
-    url: str = typer.Argument(..., help="B站视频链接"),
+    url: str = typer.Argument(..., help="B站视频链接或BV号"),
     llm_provider: str = typer.Option("mock", "--llm-provider", help="LLM provider: mock, openai, ollama"),
     asr_provider: str = typer.Option("faster-whisper", "--asr-provider", help="ASR provider: faster-whisper, mock"),
     chunk_min: int = typer.Option(3, "--chunk-min", help="Minimum chunk duration in minutes"),
@@ -547,6 +652,13 @@ def summarize_url(
     keep_audio: bool = typer.Option(False, "--keep-audio", help="Keep downloaded audio file"),
     resume: bool = typer.Option(True, "--resume/--no-resume", help="Resume from existing checkpoint (default: true)"),
     force: bool = typer.Option(False, "--force", help="Force re-transcribe even if transcript exists"),
+    cookies: Optional[str] = typer.Option(None, "--cookies", help="Cookie文件路径 (Netscape格式)"),
+    cookies_from_browser: Optional[str] = typer.Option(None, "--cookies-from-browser", 
+                                                      help="从浏览器导入Cookie: chrome/firefox/edge/brave/safari"),
+    proxy: Optional[str] = typer.Option(None, "--proxy", help="代理服务器地址"),
+    user_agent: Optional[str] = typer.Option(None, "--user-agent", help="自定义User-Agent"),
+    download_subtitle_only: bool = typer.Option(False, "--download-subtitle-only", help="只下载字幕，不进行ASR"),
+    download_audio_only: bool = typer.Option(False, "--download-audio-only", help="只下载音频，不进行字幕提取"),
 ):
     _run_summarize(
         video_path_or_url=url,
@@ -562,7 +674,13 @@ def summarize_url(
         model_dir=model_dir,
         keep_audio=keep_audio,
         force=force,
-        resume=resume
+        resume=resume,
+        cookies=cookies,
+        cookies_from_browser=cookies_from_browser,
+        proxy=proxy,
+        user_agent=user_agent,
+        download_subtitle_only=download_subtitle_only,
+        download_audio_only=download_audio_only
     )
 
 

@@ -684,3 +684,96 @@ class TestWhisperNoFallback:
 
             error_msg = str(exc_info.value)
             assert "解决方案" in error_msg or "Failed" in error_msg
+
+
+class TestBilibiliURL:
+    def test_bv_number_recognition(self):
+        from video_summarizer.media.downloader import is_bilibili_url, normalize_bilibili_url
+
+        assert is_bilibili_url("BV1xx411c7mZ")
+        assert is_bilibili_url("BV1xx411C7MZ")
+        assert normalize_bilibili_url("BV1xx411c7mZ") == "https://www.bilibili.com/video/BV1xx411c7mZ"
+
+    def test_av_number_recognition(self):
+        from video_summarizer.media.downloader import is_bilibili_url, normalize_bilibili_url
+
+        assert is_bilibili_url("av12345678")
+        assert is_bilibili_url("AV12345678")
+        assert normalize_bilibili_url("av12345678") == "https://www.bilibili.com/video/av12345678"
+
+    def test_bilibili_url_recognition(self):
+        from video_summarizer.media.downloader import is_bilibili_url, normalize_bilibili_url
+
+        assert is_bilibili_url("https://www.bilibili.com/video/BV1xx411c7mZ")
+        assert is_bilibili_url("https://b23.tv/BV1xx411c7mZ")
+        assert is_bilibili_url("//www.bilibili.com/video/BV1xx411c7mZ")
+        assert normalize_bilibili_url("//www.bilibili.com/video/BV1xx411c7mZ") == "https://www.bilibili.com/video/BV1xx411c7mZ"
+
+    def test_non_bilibili_url(self):
+        from video_summarizer.media.downloader import is_bilibili_url
+
+        assert not is_bilibili_url("https://www.youtube.com/watch?v=abc123")
+        assert not is_bilibili_url("https://example.com/video")
+
+
+class TestDownloaderErrorHandling:
+    def test_http_412_error_message(self):
+        from video_summarizer.media.downloader import handle_ytdlp_error, DownloaderError
+
+        with pytest.raises(DownloaderError) as exc_info:
+            handle_ytdlp_error("HTTP Error 412: Precondition Failed")
+        
+        error_msg = str(exc_info.value)
+        assert "HTTP 412" in error_msg
+        assert "Cookie" in error_msg
+
+    def test_http_403_error_message(self):
+        from video_summarizer.media.downloader import handle_ytdlp_error, DownloaderError
+
+        with pytest.raises(DownloaderError) as exc_info:
+            handle_ytdlp_error("HTTP Error 403: Forbidden")
+        
+        error_msg = str(exc_info.value)
+        assert "HTTP 403" in error_msg
+        assert "登录" in error_msg
+
+    def test_video_unavailable_error(self):
+        from video_summarizer.media.downloader import handle_ytdlp_error, DownloaderError
+
+        with pytest.raises(DownloaderError) as exc_info:
+            handle_ytdlp_error("Video unavailable")
+        
+        error_msg = str(exc_info.value)
+        assert "不存在" in error_msg or "删除" in error_msg
+
+
+class TestCookiesParameter:
+    def test_cookies_file_parameter(self, tmp_path):
+        from video_summarizer.media.downloader import build_ytdlp_args
+
+        cookies_file = tmp_path / "cookies.txt"
+        cookies_file.write_text("test cookies")
+        
+        args = build_ytdlp_args("https://test.com", cookies_file=str(cookies_file))
+        assert "--cookies" in args
+        assert str(cookies_file) in args
+
+    def test_cookies_from_browser_parameter(self):
+        from video_summarizer.media.downloader import build_ytdlp_args
+
+        args = build_ytdlp_args("https://test.com", cookies_from_browser="chrome")
+        assert "--cookies-from-browser" in args
+        assert "chrome" in args
+
+    def test_invalid_cookies_from_browser(self):
+        from video_summarizer.media.downloader import build_ytdlp_args, DownloaderError
+
+        with pytest.raises(DownloaderError):
+            build_ytdlp_args("https://test.com", cookies_from_browser="invalid")
+
+    def test_proxy_parameter(self):
+        from video_summarizer.media.downloader import build_ytdlp_args
+
+        args = build_ytdlp_args("https://test.com", proxy="http://127.0.0.1:7890")
+        assert "--proxy" in args
+        assert "http://127.0.0.1:7890" in args
