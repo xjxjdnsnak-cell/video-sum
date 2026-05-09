@@ -782,3 +782,118 @@ class TestCookiesParameter:
         args = build_ytdlp_args("https://test.com", proxy="http://127.0.0.1:7890")
         assert "--proxy" in args
         assert "http://127.0.0.1:7890" in args
+
+
+class TestEvaluator:
+    def test_quote_not_in_transcript_raises_error(self):
+        from video_summarizer.evaluator.evaluate import TranscriptValidator
+
+        transcript = [
+            {"start": 0.0, "end": 5.0, "text": "这是正常的转写文本内容"}
+        ]
+        validator = TranscriptValidator(transcript)
+        
+        assert not validator.quote_exists_in_transcript("完全不存在的引用XYZ123")
+        assert validator.quote_exists_in_transcript("这是正常的转写文本内容")
+
+    def test_invalid_timestamp_range(self):
+        from video_summarizer.evaluator.evaluate import TranscriptValidator
+
+        transcript = [
+            {"start": 0.0, "end": 5.0, "text": "测试内容"}
+        ]
+        validator = TranscriptValidator(transcript)
+        
+        assert not validator.time_in_transcript_range("99:00", "99:30")
+        assert validator.time_in_transcript_range("00:00", "00:05")
+
+    def test_empty_summary_raises_warning(self):
+        from video_summarizer.evaluator.evaluate import Evaluator
+
+        transcript = [{"start": 0.0, "end": 5.0, "text": "测试内容"}]
+        
+        evaluator = Evaluator(
+            transcript=transcript,
+            chunks=[],
+            final_summary={}
+        )
+        result = evaluator.evaluate()
+        
+        assert len(result.warnings) > 0
+        assert any("empty" in w.lower() for w in result.warnings)
+
+    def test_evaluation_report_generates(self):
+        from video_summarizer.evaluator.evaluate import Evaluator, generate_markdown_report
+
+        transcript = [
+            {"start": 0.0, "end": 5.0, "text": "这是测试内容"},
+            {"start": 5.0, "end": 10.0, "text": "第二段测试内容"}
+        ]
+        chunks = [
+            {"start": 0.0, "end": 5.0, "start_time": "00:00", "end_time": "00:05", "summary": "测试摘要1"},
+            {"start": 5.0, "end": 10.0, "start_time": "00:05", "end_time": "00:10", "summary": "测试摘要2"}
+        ]
+        final_summary = {
+            "one_sentence_summary": "这是一句测试总结",
+            "key_points": ["要点1", "要点2"]
+        }
+
+        evaluator = Evaluator(transcript, chunks, final_summary)
+        result = evaluator.evaluate()
+        
+        assert result.overall_score >= 0
+        assert result.overall_score <= 100
+        assert "completeness_score" in result.to_dict()
+
+    def test_evaluate_command_exists(self):
+        from video_summarizer.cli import app
+        from typer.testing import CliRunner
+
+        runner = CliRunner()
+        result = runner.invoke(app, ['evaluate', '--help'])
+        assert result.exit_code == 0
+        assert "video_id" in result.output
+
+    def test_mock_evaluation_score_stable(self):
+        from video_summarizer.evaluator.evaluate import Evaluator
+
+        transcript = [
+            {"start": 0.0, "end": 5.0, "text": "这是第一段真实转写内容"},
+            {"start": 5.0, "end": 10.0, "text": "这是第二段真实转写内容"}
+        ]
+        chunks = [
+            {"start": 0.0, "end": 5.0, "start_time": "00:00", "end_time": "00:05", 
+             "summary": "第一段摘要", "topic": "第一段主题"},
+            {"start": 5.0, "end": 10.0, "start_time": "00:05", "end_time": "00:10",
+             "summary": "第二段摘要", "topic": "第二段主题"}
+        ]
+        final_summary = {
+            "one_sentence_summary": "这是一句测试总结内容",
+            "chapter_toc": ["章节1", "章节2"],
+            "key_points": ["核心观点1", "核心观点2"]
+        }
+
+        evaluator = Evaluator(transcript, chunks, final_summary)
+        result = evaluator.evaluate()
+        
+        score1 = result.overall_score
+        evaluator2 = Evaluator(transcript, chunks, final_summary)
+        result2 = evaluator2.evaluate()
+        score2 = result2.overall_score
+        
+        assert score1 == score2
+
+    def test_hallucinated_entity_warning_generated(self):
+        from video_summarizer.evaluator.evaluate import Evaluator
+
+        transcript = [
+            {"start": 0.0, "end": 5.0, "text": "这是正常的测试内容"}
+        ]
+        final_summary = {
+            "one_sentence_summary": "完全不存在的XYZ123名字出现在了视频中这是一个很长很长的摘要内容"
+        }
+
+        evaluator = Evaluator(transcript, [], final_summary)
+        result = evaluator.evaluate()
+        
+        assert len(result.warnings) > 0 or len(result.issues) > 0

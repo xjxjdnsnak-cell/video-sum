@@ -1,0 +1,160 @@
+{
+  "transcript": [
+    {
+      "start": 0.0,
+      "end": 5.0,
+      "start_time": "00:00",
+      "end_time": "00:05",
+      "text": "欢迎观看这个关于Python编程的教程视频",
+      "source": "mock"
+    },
+    {
+      "start": 5.0,
+      "end": 10.0,
+      "start_time": "00:05",
+      "end_time": "00:10",
+      "text": "今天我们学习如何使用faster-whisper进行语音识别",
+      "source": "mock"
+    },
+    {
+      "start": 10.0,
+      "end": 15.0,
+      "start_time": "00:10",
+      "end_time": "00:15",
+      "text": "faster-whisper是一个高效的语音识别模型",
+      "source": "mock"
+    },
+    {
+      "start": 15.0,
+      "end": 20.0,
+      "start_time": "00:15",
+      "end_time": "00:20",
+      "text": "它支持多种语言的识别，包括中文和英文",
+      "source": "mock"
+    },
+    {
+      "start": 20.0,
+      "end": 25.0,
+      "start_time": "00:20",
+      "end_time": "00:25",
+      "text": "使用faster-whisper可以快速准确地将语音转换为文字",
+      "source": "mock"
+    }
+  ],
+  "chunks": [
+    {
+      "start": 0.0,
+      "end": 15.0,
+      "start_time": "00:00",
+      "end_time": "00:15",
+      "topic": "Python教程介绍",
+      "key_points": [
+        "学习Python编程基础",
+        "了解语音识别技术"
+      ],
+      "important_terms": [
+        "faster-whisper: 高效语音识别模型",
+        "语音识别: 将语音转换为文字"
+      ],
+      "quote": "欢迎观看这个关于Python编程的教程视频",
+      "chapter_hint": "课程介绍",
+      "summary": "这是一个Python编程教程，介绍了如何使用faster-whisper进行语音识别。"
+    },
+    {
+      "start": 15.0,
+      "end": 25.0,
+      "start_time": "00:15",
+      "end_time": "00:25",
+      "topic": "faster-whisper特性",
+      "key_points": [
+        "支持多语言识别",
+        "快速准确转换"
+      ],
+      "important_terms": [
+        "多语言支持: 可识别中英文等"
+      ],
+      "quote": "使用faster-whisper可以快速准确地将语音转换为文字",
+      "chapter_hint": "技术特性",
+      "summary": "faster-whisper支持多种语言，可以快速准确地完成语音到文字的转换。"
+    }
+  ],
+  "final_summary": {
+    "one_sentence_summary": "本视频介绍了如何使用faster-whisper进行语音识别",
+    "chapter_toc": [
+      "课程介绍",
+      "faster-whisper特性"
+    ],
+    "key_points": [
+      "faster-whisper是高效的语音识别模型",
+      "支持中文和英文等多种语言",
+      "可以快速准确地将语音转换为文字"
+    ],
+    "key_knowledge": [
+      "faster-whisper语音识别技术",
+      "多语言支持"
+    ],
+    "action_items": [
+      "安装faster-whisper",
+      "尝试运行语音识别示例"
+    ],
+    "terms": [
+      {
+        "term": "faster-whisper",
+        "explanation": "高效的语音识别模型"
+      },
+      {
+        "term": "语音识别",
+        "explanation": "将人类语音转换为文本的技术"
+      }
+    ],
+    "review_questions": [
+      "faster-whisper支持哪些语言？",
+      "如何使用faster-whisper进行语音识别？"
+    ]
+  },
+  "quotes": [
+    {
+      "text": "欢迎观看这个关于Python编程的教程视频",
+      "start_time": "00:00",
+      "end_time": "00:05"
+    },
+    {
+      "text": "今天我们学习如何使用faster-whisper进行语音识别",
+      "start_time": "00:05",
+      "end_time": "00:10"
+    },
+    {
+      "text": "使用faster-whisper可以快速准确地将语音转换为文字",
+      "start_time": "00:20",
+      "end_time": "00:25"
+    }
+  ],
+  "terms": [
+    {
+      "term": "faster-whisper",
+      "explanation": "高效的语音识别模型",
+      "first_seen_time": "00:05"
+    },
+    {
+      "term": "语音识别",
+      "explanation": "将人类语音转换为文本的技术",
+      "first_seen_time": "00:05"
+    }
+  ],
+  "chapters": [
+    {
+      "title": "课程介绍",
+      "start_time": "00:00",
+      "end_time": "00:15",
+      "chunks": [0],
+      "summary": "介绍课程内容和faster-whisper"
+    },
+    {
+      "title": "faster-whisper特性",
+      "start_time": "00:15",
+      "end_time": "00:25",
+      "chunks": [1],
+      "summary": "faster-whisper的多语言支持和高效性能"
+    }
+  ]
+}

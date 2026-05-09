@@ -1,0 +1,93 @@
+{
+  "description": "包含各种质量问题的摘要用于测试",
+  "transcript": [
+    {
+      "start": 0.0,
+      "end": 5.0,
+      "start_time": "00:00",
+      "end_time": "00:05",
+      "text": "这是第一段内容讲述学习方法",
+      "source": "mock"
+    },
+    {
+      "start": 5.0,
+      "end": 10.0,
+      "start_time": "00:05",
+      "end_time": "00:10",
+      "text": "第二段内容继续讨论学习技巧",
+      "source": "mock"
+    },
+    {
+      "start": 10.0,
+      "end": 15.0,
+      "start_time": "00:10",
+      "end_time": "00:15",
+      "text": "第三段介绍重要的概念定义",
+      "source": "mock"
+    }
+  ],
+  "issues": [
+    {
+      "type": "hallucinated_quote",
+      "description": "引用不在transcript中",
+      "data": {
+        "quotes": [
+          {
+            "text": "完全不存在的引用内容XYZ123",
+            "start_time": "00:00",
+            "end_time": "00:05"
+          }
+        ]
+      }
+    },
+    {
+      "type": "invalid_timestamp",
+      "description": "时间戳超出范围",
+      "data": {
+        "chunks": [
+          {
+            "start": 0.0,
+            "end": 15.0,
+            "start_time": "99:00",
+            "end_time": "99:30",
+            "summary": "这是错误时间戳的chunk"
+          }
+        ]
+      }
+    },
+    {
+      "type": "empty_summary",
+      "description": "空摘要",
+      "data": {
+        "final_summary": {
+          "one_sentence_summary": "",
+          "key_points": []
+        }
+      }
+    },
+    {
+      "type": "duplicate_content",
+      "description": "重复摘要内容",
+      "data": {
+        "final_summary": {
+          "one_sentence_summary": "学习方法很重要",
+          "detailed_summary": "学习方法很重要。学习方法很重要。学习方法很重要。",
+          "key_points": [
+            "学习方法很重要",
+            "学习方法很重要",
+            "学习方法很重要"
+          ]
+        }
+      }
+    },
+    {
+      "type": "hallucinated_entity",
+      "description": "提到不存在的实体",
+      "data": {
+        "final_summary": {
+          "one_sentence_summary": "张三和李四在视频中讨论了Python的高级特性"
+        }
+      }
+    }
+  ]
+}

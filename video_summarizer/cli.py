@@ -25,7 +25,7 @@ from .media.downloader import (
 )
 from .asr.faster_whisper_engine import FasterWhisperEngine, FasterWhisperError, Segment
 from .asr.subtitle_parser import parse_srt
-from .summarizer.pipeline import summarize_video_pipeline, get_transcript, get_summary_chunks, get_final_summary, save_transcript
+from .summarizer.pipeline import summarize_video_pipeline, get_transcript, get_summary_chunks, get_final_summary, save_transcript, get_chapters, get_quotes, get_terms
 from .summarizer.prompts import NoteStyle
 from .exporters.markdown import export_markdown
 from .exporters.srt import export_srt
@@ -837,6 +837,102 @@ def export_cmd(
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(code=1)
+
+
+@app.command("evaluate")
+def evaluate(
+    video_id: int = typer.Argument(..., help="视频ID"),
+    format: str = typer.Option("markdown", "--format", "-f", help="输出格式: markdown, json"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="输出文件路径"),
+):
+    from .summarizer.pipeline import get_transcript, get_summary_chunks, get_final_summary, get_chapters, get_quotes, get_terms
+    from .evaluator.evaluate import evaluate_video
+    
+    info = get_video_info(video_id)
+    if not info:
+        console.print(f"[red]Error: Video not found: {video_id}[/red]")
+        raise typer.Exit(code=1)
+    
+    transcript = get_transcript(video_id)
+    if not transcript:
+        console.print(f"[red]Error: No transcript found for video {video_id}[/red]")
+        raise typer.Exit(code=1)
+    
+    console.print(f"[cyan]Evaluating video {video_id}...[/cyan]")
+    
+    chunks = get_summary_chunks(video_id)
+    final_summary = get_final_summary(video_id)
+    quotes = get_quotes(video_id)
+    terms = get_terms(video_id)
+    chapters = get_chapters(video_id)
+    
+    output_content, result = evaluate_video(
+        video_id=video_id,
+        transcript=transcript,
+        chunks=chunks,
+        final_summary=final_summary,
+        quotes=quotes,
+        terms=terms,
+        chapters=chapters,
+        format=format
+    )
+    
+    if output:
+        output_path = Path(output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(output_content)
+        console.print(f"[green]Evaluation report saved to: {output_path}[/green]")
+    else:
+        settings.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        eval_dir = settings.OUTPUT_DIR / "evaluations"
+        eval_dir.mkdir(exist_ok=True)
+        
+        if format == "json":
+            output_path = eval_dir / f"{video_id}_evaluation.json"
+        else:
+            output_path = eval_dir / f"{video_id}_evaluation.md"
+        
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(output_content)
+        
+        console.print(f"[green]Evaluation report saved to: {output_path}[/green]")
+    
+    console.print()
+    console.print(Panel(f"[bold cyan]评估结果[/bold cyan]", expand=False))
+    console.print()
+    console.print(f"[bold]总分:[/bold] {result.overall_score} / 100")
+    
+    score_color = "green" if result.overall_score >= 80 else "yellow" if result.overall_score >= 60 else "red"
+    console.print(f"[bold]等级:[/bold] [{score_color}]{_get_score_emoji(result.overall_score)} ({result.overall_score}分)[/{score_color}]")
+    console.print()
+    
+    if result.warnings:
+        console.print(f"[yellow]发现 {len(result.warnings)} 个问题[/yellow]")
+        for warning in result.warnings[:3]:
+            console.print(f"  [yellow]• {warning[:80]}[/yellow]")
+        if len(result.warnings) > 3:
+            console.print(f"  [dim]... 和其他 {len(result.warnings) - 3} 个问题[/dim]")
+    
+    if result.issues:
+        console.print(f"[red]发现 {len(result.issues)} 个严重问题[/red]")
+        for issue in result.issues[:3]:
+            console.print(f"  [red]• {issue[:80]}[/red]")
+        if len(result.issues) > 3:
+            console.print(f"  [dim]... 和其他 {len(result.issues) - 3} 个问题[/dim]")
+
+
+def _get_score_emoji(score: float) -> str:
+    if score >= 90:
+        return "🌟 优秀"
+    elif score >= 80:
+        return "✅ 良好"
+    elif score >= 70:
+        return "👍 一般"
+    elif score >= 60:
+        return "⚠️ 及格"
+    else:
+        return "❌ 需改进"
 
 
 @app.command("list")

@@ -1,7 +1,7 @@
 # Video Summarizer
 
-> **版本**: v0.4.0-note-quality
-> **目标**: 提升视频总结质量、笔记结构和知识点提取能力
+> **版本**: v0.4.1-quality-evaluation
+> **目标**: 评估摘要质量，支持回归测试机制
 
 B站/本地视频总结器 - 自动提取音频/字幕，转成文字，按时间戳分段，调用 LLM 生成摘要，最后导出 Markdown 笔记。
 
@@ -350,6 +350,34 @@ video-summarizer summarize-local video.mp4 --note-style study --llm-provider moc
 # 生成简短笔记
 video-summarizer summarize-local video.mp4 --note-style brief --llm-provider mock
 ```
+
+## 评估与回归测试
+
+使用 `evaluate` 命令评估已有总结的质量：
+
+```bash
+video-summarizer evaluate VIDEO_ID
+video-summarizer evaluate VIDEO_ID --format json
+```
+
+### 评估维度
+
+| 维度 | 说明 |
+|------|------|
+| completeness | 是否覆盖主要内容 |
+| faithfulness | 是否忠于原始转写 |
+| timestamp_accuracy | 时间戳是否来自真实 transcript/chunk |
+| structure_quality | 结构是否清晰 |
+| note_usefulness | 是否适合复习/学习 |
+| hallucination_risk | 是否有编造风险 |
+
+### 规则校验
+
+评估器会进行以下规则校验：
+- Quote 必须能在 transcript 中找到
+- 时间戳必须落在 transcript/chunk 范围内
+- Final summary 不得出现完全不存在的高风险实体
+- 空摘要、过短摘要、重复摘要会报 warning
 
 ---
 
