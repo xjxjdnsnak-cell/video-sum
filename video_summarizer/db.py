@@ -98,6 +98,8 @@ def init_db():
                 detailed_summary TEXT,
                 key_points TEXT,
                 questions TEXT,
+                extra_data TEXT,
+                note_style TEXT DEFAULT 'detailed',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (video_id) REFERENCES videos(id)
             )
@@ -111,6 +113,38 @@ def init_db():
                 final_status TEXT,
                 error_message TEXT,
                 stages_completed TEXT,
+                FOREIGN KEY (video_id) REFERENCES videos(id)
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS video_chapters (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                video_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                start_time TEXT NOT NULL,
+                end_time TEXT NOT NULL,
+                chunk_indices TEXT,
+                summary TEXT,
+                FOREIGN KEY (video_id) REFERENCES videos(id)
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS video_quotes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                video_id INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                start_time TEXT NOT NULL,
+                end_time TEXT NOT NULL,
+                FOREIGN KEY (video_id) REFERENCES videos(id)
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS video_terms (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                video_id INTEGER NOT NULL,
+                term TEXT NOT NULL,
+                explanation TEXT,
+                first_seen_time TEXT,
                 FOREIGN KEY (video_id) REFERENCES videos(id)
             )
         """)

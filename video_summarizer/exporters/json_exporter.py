@@ -13,10 +13,21 @@ def export_json(
     transcript: List[Dict],
     chunk_summaries: List[Dict],
     final_summary: Optional[Dict],
+    chapters: List[Dict] = None,
+    quotes: List[Dict] = None,
+    terms: List[Dict] = None,
+    note_style: str = "detailed",
     output_path: Optional[Union[str, Path]] = None,
     output_dir: Optional[Union[str, Path]] = None,
     output_filename: Optional[str] = None
 ) -> str:
+    if chapters is None:
+        chapters = []
+    if quotes is None:
+        quotes = []
+    if terms is None:
+        terms = []
+
     if output_path is not None:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -40,12 +51,16 @@ def export_json(
         "url": video_url,
         "author": video_author,
         "duration": duration,
+        "note_style": note_style,
         "exported_at": datetime.now().isoformat(),
         "transcript": [
             {
                 "start": seg["start"],
                 "end": seg["end"],
-                "text": seg["text"]
+                "start_time": seg.get("start_time", ""),
+                "end_time": seg.get("end_time", ""),
+                "text": seg["text"],
+                "source": seg.get("source", "asr")
             }
             for seg in transcript
         ],
@@ -55,9 +70,41 @@ def export_json(
                 "end": chunk["end"],
                 "start_time": chunk["start_time"],
                 "end_time": chunk["end_time"],
-                "summary": chunk["summary"]
+                "topic": chunk.get("topic", ""),
+                "key_points": chunk.get("key_points", []),
+                "important_terms": chunk.get("important_terms", []),
+                "quote": chunk.get("quote", ""),
+                "chapter_hint": chunk.get("chapter_hint", ""),
+                "summary": chunk.get("summary", ""),
+                "source_text": chunk.get("source_text", "")[:500]
             }
             for chunk in chunk_summaries
+        ],
+        "chapters": [
+            {
+                "title": chapter.get("title", ""),
+                "start_time": chapter.get("start_time", ""),
+                "end_time": chapter.get("end_time", ""),
+                "chunks": chapter.get("chunks", []),
+                "summary": chapter.get("summary", "")
+            }
+            for chapter in chapters
+        ],
+        "quotes": [
+            {
+                "text": quote.get("text", ""),
+                "start_time": quote.get("start_time", ""),
+                "end_time": quote.get("end_time", "")
+            }
+            for quote in quotes
+        ],
+        "terms": [
+            {
+                "term": term.get("term", ""),
+                "explanation": term.get("explanation", ""),
+                "first_seen_time": term.get("first_seen_time", "")
+            }
+            for term in terms
         ],
         "final_summary": final_summary
     }

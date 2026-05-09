@@ -1,7 +1,7 @@
 # Video Summarizer
 
-> **版本**: v0.3.0-bilibili-ingestion
-> **目标**: 增强 B站链接输入能力，让 summarize-url 在真实网络环境下更稳定
+> **版本**: v0.4.0-note-quality
+> **目标**: 提升视频总结质量、笔记结构和知识点提取能力
 
 B站/本地视频总结器 - 自动提取音频/字幕，转成文字，按时间戳分段，调用 LLM 生成摘要，最后导出 Markdown 笔记。
 
@@ -329,6 +329,26 @@ pytest tests/ -v
 2. 预下载模型: video-summarizer download-model --model tiny
 3. 尝试更小的模型: --model tiny
 4. 或使用 Mock ASR 测试流程: --asr-provider mock
+```
+
+## 笔记模板
+
+使用 `--note-style` 参数选择不同的笔记输出模板：
+
+| 模板 | 说明 |
+|------|------|
+| `brief` | 一句话总结 + 重点列表 + 精选引用 |
+| `detailed` | 详细总结 + 章节目录 + 时间轴摘要 + 核心观点 |
+| `study` | 知识点 + 术语解释 + 复习问题 + 易错点 |
+| `meeting` | 议题 + 决策 + 待办事项 + 责任人 |
+| `tutorial` | 步骤拆解 + 命令/代码块 + 注意事项 + 前置要求 |
+
+```bash
+# 生成学习笔记
+video-summarizer summarize-local video.mp4 --note-style study --llm-provider mock
+
+# 生成简短笔记
+video-summarizer summarize-local video.mp4 --note-style brief --llm-provider mock
 ```
 
 ---

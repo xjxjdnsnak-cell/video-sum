@@ -7,6 +7,8 @@ from unittest.mock import patch, MagicMock
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from video_summarizer.summarizer.prompts import NoteStyle
+
 
 class TestConfig:
     def test_settings_defaults(self):
@@ -74,16 +76,17 @@ class TestLLMClient:
         client = MockLLMClient()
 
         result = client.summarize_chunk("Test text content", "00:00:00", "00:05:00")
-        assert "[Mock]" in result
-        assert "00:00:00" in result
+        assert "topic" in result
+        assert "key_points" in result
+        assert "summary" in result
+        assert "quote" in result
+        assert "00:00:00" in result["topic"]
 
         final = client.generate_final_summary("Test Video", [
             {"start_time": "00:00", "end_time": "05:00", "summary": "Test summary"}
         ])
         assert "one_sentence_summary" in final
-        assert "detailed_summary" in final
         assert "key_points" in final
-        assert "questions" in final
 
     def test_get_llm_client_mock(self):
         from video_summarizer.summarizer.llm_client import get_llm_client, MockLLMClient
@@ -259,7 +262,7 @@ class TestExporters:
 
         assert Path(result).exists()
         content = Path(result).read_text()
-        assert "视频总结：Test Video" in content
+        assert "详细笔记：" in content or "Test Video" in content
         assert "一句话总结" in content
         assert "Test segment" in content
 
@@ -326,7 +329,7 @@ class TestMockPipeline:
                     " ".join([s["text"] for s in mock_transcript]),
                     "00:00:00",
                     "00:00:10"
-                )
+                )["summary"]
             }
         ]
 
@@ -341,13 +344,15 @@ class TestMockPipeline:
             transcript=mock_transcript,
             chunk_summaries=mock_chunks,
             final_summary=final_summary,
+            note_style=NoteStyle.DETAILED,
             output_dir=tmp_path
         )
 
         content = Path(output_path).read_text()
-
-        assert "视频总结：Test Video" in content
-        assert "## 一句话总结" in content
+        assert "详细笔记" in content
+        assert "Test Video" in content
+        assert "一句话总结" in content
+        assert "完整转写" in content
         assert "## 详细总结" in content
         assert "## 时间轴摘要" in content
         assert "## 关键知识点" in content

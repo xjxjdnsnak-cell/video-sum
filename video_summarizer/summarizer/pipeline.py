@@ -7,7 +7,8 @@ from ..models import Video, TranscriptSegment, SummaryChunk, FinalSummary
 from ..db import get_db
 from ..utils.timefmt import format_timestamp
 from .chunker import create_chunks_from_segments, merge_short_chunks, TextChunk
-from .llm_client import get_llm_client, BaseLLMClient
+from .llm_client import get_llm_client, BaseLLMClient, format_timestamp as llm_format_timestamp
+from .prompts import NoteStyle
 
 
 console = Console()
@@ -61,25 +62,47 @@ def get_summary_chunks(video_id: int) -> List[Dict]:
         return [{"start": r["start"], "end": r["end"], "source_text": r["source_text"], "summary": r["summary"]} for r in rows]
 
 
-def save_final_summary(video_id: int, summary: Dict) -> int:
+def save_final_summary(video_id: int, summary: Dict, note_style: NoteStyle = NoteStyle.DETAILED) -> int:
+    import json
+    
     with get_db() as conn:
         cursor = conn.cursor()
+        extra_data = {}
+        key_points_val = summary.get("key_points", [])
+        questions_val = summary.get("review_questions", [])
+        
+        if isinstance(key_points_val, list):
+            key_points_val = "\n".join(f"- {p}" for p in key_points_val)
+        if isinstance(questions_val, list):
+            questions_val = "\n".join(f"{i+1}. {q}" for i, q in enumerate(questions_val))
+        
+        for key, value in summary.items():
+            if key not in ["one_sentence_summary", "detailed_summary", "key_points", "review_questions", "questions"]:
+                if isinstance(value, (list, dict)):
+                    extra_data[key] = json.dumps(value, ensure_ascii=False)
+                else:
+                    extra_data[key] = value
+        
         cursor.execute("""
             INSERT OR REPLACE INTO final_summaries 
-            (video_id, one_sentence_summary, detailed_summary, key_points, questions)
-            VALUES (?, ?, ?, ?, ?)
+            (video_id, one_sentence_summary, detailed_summary, key_points, questions, extra_data, note_style)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
             video_id,
             summary.get("one_sentence_summary", ""),
-            summary.get("detailed_summary", ""),
-            summary.get("key_points", ""),
-            summary.get("questions", "")
+            summary.get("detailed_summary", summary.get("timeline_summary", "")),
+            key_points_val,
+            questions_val,
+            json.dumps(extra_data, ensure_ascii=False) if extra_data else None,
+            note_style.value
         ))
         conn.commit()
         return cursor.lastrowid
 
 
 def get_final_summary(video_id: int) -> Optional[Dict]:
+    import json
+    
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -87,8 +110,110 @@ def get_final_summary(video_id: int) -> Optional[Dict]:
         """, (video_id,))
         row = cursor.fetchone()
         if row:
-            return dict(row)
+            result = dict(row)
+            if result.get("extra_data"):
+                try:
+                    extra = json.loads(result["extra_data"])
+                    result.update(extra)
+                except json.JSONDecodeError:
+                    pass
+            return result
         return None
+
+
+def save_chapters(video_id: int, chapters: List[Dict]) -> int:
+    import json
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for chapter in chapters:
+            cursor.execute("""
+                INSERT INTO video_chapters (video_id, title, start_time, end_time, chunk_indices, summary)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                video_id,
+                chapter.get("title", ""),
+                chapter.get("start_time", ""),
+                chapter.get("end_time", ""),
+                json.dumps(chapter.get("chunks", [])),
+                chapter.get("summary", "")
+            ))
+        return len(chapters)
+
+
+def get_chapters(video_id: int) -> List[Dict]:
+    import json
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM video_chapters WHERE video_id = ? ORDER BY start_time
+        """, (video_id,))
+        rows = cursor.fetchall()
+        result = []
+        for r in rows:
+            chapter = dict(r)
+            if chapter.get("chunk_indices"):
+                try:
+                    chapter["chunks"] = json.loads(chapter["chunk_indices"])
+                except json.JSONDecodeError:
+                    chapter["chunks"] = []
+            else:
+                chapter["chunks"] = []
+            result.append(chapter)
+        return result
+
+
+def save_quotes(video_id: int, quotes: List[Dict]) -> int:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for quote in quotes:
+            cursor.execute("""
+                INSERT INTO video_quotes (video_id, text, start_time, end_time)
+                VALUES (?, ?, ?, ?)
+            """, (
+                video_id,
+                quote.get("text", ""),
+                quote.get("start_time", ""),
+                quote.get("end_time", "")
+            ))
+        return len(quotes)
+
+
+def get_quotes(video_id: int) -> List[Dict]:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM video_quotes WHERE video_id = ? ORDER BY start_time
+        """, (video_id,))
+        rows = cursor.fetchall()
+        return [dict(r) for r in rows]
+
+
+def save_terms(video_id: int, terms: List[Dict]) -> int:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for term in terms:
+            cursor.execute("""
+                INSERT INTO video_terms (video_id, term, explanation, first_seen_time)
+                VALUES (?, ?, ?, ?)
+            """, (
+                video_id,
+                term.get("term", ""),
+                term.get("explanation", ""),
+                term.get("first_seen_time", "")
+            ))
+        return len(terms)
+
+
+def get_terms(video_id: int) -> List[Dict]:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM video_terms WHERE video_id = ? ORDER BY first_seen_time
+        """, (video_id,))
+        rows = cursor.fetchall()
+        return [dict(r) for r in rows]
 
 
 def update_video_status(video_id: int, status: str):
@@ -102,10 +227,12 @@ def summarize_video_pipeline(
     video_id: int,
     llm_provider: Optional[str] = None,
     chunk_min: int = 3,
-    chunk_max: int = 5
+    chunk_max: int = 5,
+    note_style: NoteStyle = NoteStyle.DETAILED
 ) -> Dict:
     update_video_status(video_id, "processing")
     console.print(f"[yellow]Starting summarization pipeline for video {video_id}...[/yellow]")
+    console.print(f"[dim]Note style: {note_style.value}[/dim]")
 
     try:
         segments = get_transcript(video_id)
@@ -149,18 +276,48 @@ def summarize_video_pipeline(
                     "start_time": chunk.start_time_str,
                     "end_time": chunk.end_time_str,
                     "source_text": chunk.text[:500],
-                    "summary": summary
+                    "topic": summary.get("topic", ""),
+                    "key_points": summary.get("key_points", []),
+                    "important_terms": summary.get("important_terms", []),
+                    "quote": summary.get("quote", ""),
+                    "chapter_hint": summary.get("chapter_hint", ""),
+                    "summary": summary.get("summary", "")
                 })
                 progress.update(task, advance=1)
 
         save_summary_chunks(video_id, chunk_summaries)
 
+        console.print("[cyan]Extracting representative quotes...[/cyan]")
+        quotes = llm_client.extract_quotes(segments)
+        if quotes:
+            save_quotes(video_id, quotes)
+            console.print(f"[dim]Extracted {len(quotes)} quotes[/dim]")
+
+        console.print("[cyan]Aggregating chapters...[/cyan]")
+        chapters = llm_client.aggregate_chapters(chunk_summaries)
+        if chapters:
+            save_chapters(video_id, chapters)
+            console.print(f"[dim]Created {len(chapters)} chapters[/dim]")
+
         console.print("[cyan]Generating final summary...[/cyan]")
         final_summary = llm_client.generate_final_summary(
             video_title=video_title,
-            chunk_summaries=chunk_summaries
+            chunk_summaries=chunk_summaries,
+            note_style=note_style
         )
-        save_final_summary(video_id, final_summary)
+
+        if note_style == NoteStyle.STUDY and final_summary:
+            console.print("[cyan]Extracting terms...[/cyan]")
+            terms = llm_client.extract_terms(
+                video_title=video_title,
+                transcript=segments,
+                chapter_summaries=chunk_summaries
+            )
+            if terms:
+                save_terms(video_id, terms)
+                console.print(f"[dim]Extracted {len(terms)} terms[/dim]")
+
+        save_final_summary(video_id, final_summary, note_style)
 
         update_video_status(video_id, "completed")
         console.print("[green]Summarization complete![/green]")
@@ -168,7 +325,10 @@ def summarize_video_pipeline(
         return {
             "video_id": video_id,
             "chunks": chunk_summaries,
-            "final_summary": final_summary
+            "final_summary": final_summary,
+            "chapters": chapters,
+            "quotes": quotes,
+            "note_style": note_style.value
         }
 
     except Exception as e:

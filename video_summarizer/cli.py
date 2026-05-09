@@ -26,6 +26,7 @@ from .media.downloader import (
 from .asr.faster_whisper_engine import FasterWhisperEngine, FasterWhisperError, Segment
 from .asr.subtitle_parser import parse_srt
 from .summarizer.pipeline import summarize_video_pipeline, get_transcript, get_summary_chunks, get_final_summary, save_transcript
+from .summarizer.prompts import NoteStyle
 from .exporters.markdown import export_markdown
 from .exporters.srt import export_srt
 from .exporters.json_exporter import export_json
@@ -353,6 +354,7 @@ def _run_summarize(
     user_agent: Optional[str] = None,
     download_subtitle_only: bool = False,
     download_audio_only: bool = False,
+    note_style: NoteStyle = NoteStyle.DETAILED,
 ):
     use_mock_asr = asr_provider.lower() == "mock"
     check_dependencies(require_asr=not use_mock_asr)
@@ -512,11 +514,17 @@ def _run_summarize(
                 video_id,
                 llm_provider=llm_provider,
                 chunk_min=chunk_min,
-                chunk_max=chunk_max
+                chunk_max=chunk_max,
+                note_style=note_style
             )
             result_chunks = result["chunks"]
+            result_chapters = result.get("chapters", [])
+            result_quotes = result.get("quotes", [])
 
         video_title = get_video_info(video_id).get('title', 'Untitled') if not is_url else info.title
+
+        result_chapters = result.get("chapters", [])
+        result_quotes = result.get("quotes", [])
 
         update_video_stage(video_id, "exported")
 
@@ -526,6 +534,9 @@ def _run_summarize(
             transcript=transcript_data,
             chunk_summaries=result_chunks,
             final_summary=get_final_summary(video_id),
+            chapters=result_chapters,
+            quotes=result_quotes,
+            note_style=note_style,
             output_dir=output_dir
         )
         json_path = export_json(
@@ -537,6 +548,9 @@ def _run_summarize(
             transcript=transcript_data,
             chunk_summaries=result_chunks,
             final_summary=get_final_summary(video_id),
+            chapters=result_chapters,
+            quotes=result_quotes,
+            note_style=note_style.value,
             output_dir=output_dir
         )
         srt_path = export_srt(transcript_data, output_dir / f"{video_title[:50]}.srt")
@@ -618,6 +632,8 @@ def summarize_local(
     keep_audio: bool = typer.Option(False, "--keep-audio", help="Keep extracted audio file"),
     resume: bool = typer.Option(True, "--resume/--no-resume", help="Resume from existing checkpoint (default: true)"),
     force: bool = typer.Option(False, "--force", help="Force re-transcribe even if transcript exists"),
+    note_style: NoteStyle = typer.Option(NoteStyle.DETAILED, "--note-style",
+                                        help="笔记模板: brief, detailed, study, meeting, tutorial"),
 ):
     _run_summarize(
         video_path_or_url=video_path,
@@ -633,7 +649,8 @@ def summarize_local(
         model_dir=model_dir,
         keep_audio=keep_audio,
         force=force,
-        resume=resume
+        resume=resume,
+        note_style=note_style
     )
 
 
@@ -659,6 +676,8 @@ def summarize_url(
     user_agent: Optional[str] = typer.Option(None, "--user-agent", help="自定义User-Agent"),
     download_subtitle_only: bool = typer.Option(False, "--download-subtitle-only", help="只下载字幕，不进行ASR"),
     download_audio_only: bool = typer.Option(False, "--download-audio-only", help="只下载音频，不进行字幕提取"),
+    note_style: NoteStyle = typer.Option(NoteStyle.DETAILED, "--note-style", 
+                                        help="笔记模板: brief, detailed, study, meeting, tutorial"),
 ):
     _run_summarize(
         video_path_or_url=url,
@@ -680,7 +699,8 @@ def summarize_url(
         proxy=proxy,
         user_agent=user_agent,
         download_subtitle_only=download_subtitle_only,
-        download_audio_only=download_audio_only
+        download_audio_only=download_audio_only,
+        note_style=note_style
     )
 
 
