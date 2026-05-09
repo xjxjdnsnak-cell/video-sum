@@ -91,6 +91,43 @@ class TestLLMClient:
         assert isinstance(client, MockLLMClient)
 
 
+class TestASREngine:
+    def test_mock_asr_returns_mock_segments(self):
+        from video_summarizer.asr.faster_whisper_engine import FasterWhisperEngine
+
+        engine = FasterWhisperEngine(use_mock=True)
+        segments = engine.model.transcribe("/fake/path.wav")
+
+        assert len(segments) > 0
+        assert all(hasattr(s, 'start') and hasattr(s, 'end') and hasattr(s, 'text') for s in segments)
+        assert any("[Mock转写]" in s.text for s in segments)
+
+    def test_whisper_failure_does_not_fallback_to_mock(self):
+        from video_summarizer.asr.faster_whisper_engine import FasterWhisperEngine, FasterWhisperError
+        import faster_whisper
+
+        engine = FasterWhisperEngine(use_mock=False, model_name="nonexistent-model")
+
+        with patch.object(faster_whisper, 'WhisperModel', side_effect=Exception("Network error")):
+            with pytest.raises(FasterWhisperError) as exc_info:
+                _ = engine.model
+
+            error_msg = str(exc_info.value)
+            assert "解决方案" in error_msg
+            assert "--asr-provider mock" in error_msg
+            assert "Failed to download" in error_msg or "Failed to load" in error_msg
+
+    def test_asr_provider_mock_flag(self):
+        from video_summarizer.asr.faster_whisper_engine import FasterWhisperEngine
+
+        engine_mock = FasterWhisperEngine(use_mock=True)
+        assert engine_mock.use_mock == True
+        assert isinstance(engine_mock.model, type(engine_mock.model))
+
+        engine_real = FasterWhisperEngine(use_mock=False)
+        assert engine_real.use_mock == False
+
+
 class TestChunker:
     def test_create_chunks_from_segments(self):
         from video_summarizer.summarizer.chunker import create_chunks_from_segments
@@ -232,6 +269,90 @@ class TestExporters:
         data = json.loads(Path(result).read_text())
         assert data["video_id"] == 1
         assert data["title"] == "Test"
+
+
+class TestMockPipeline:
+    def test_mock_asr_with_mock_llm_creates_full_markdown(self, tmp_path):
+        from video_summarizer.exporters.markdown import export_markdown
+        from video_summarizer.summarizer.llm_client import MockLLMClient
+
+        llm_client = MockLLMClient()
+
+        mock_transcript = [
+            {"start": 0.0, "end": 5.0, "text": "[Mock转写] 第一段内容"},
+            {"start": 5.0, "end": 10.0, "text": "[Mock转写] 第二段内容"},
+        ]
+
+        mock_chunks = [
+            {
+                "start": 0.0,
+                "end": 10.0,
+                "start_time": "00:00:00",
+                "end_time": "00:00:10",
+                "summary": llm_client.summarize_chunk(
+                    " ".join([s["text"] for s in mock_transcript]),
+                    "00:00:00",
+                    "00:00:10"
+                )
+            }
+        ]
+
+        final_summary = llm_client.generate_final_summary(
+            "Test Video",
+            [{"start_time": "00:00:00", "end_time": "00:00:10", "summary": mock_chunks[0]["summary"]}]
+        )
+
+        output_path = export_markdown(
+            video_id=1,
+            video_title="Test Video",
+            transcript=mock_transcript,
+            chunk_summaries=mock_chunks,
+            final_summary=final_summary,
+            output_dir=tmp_path
+        )
+
+        content = Path(output_path).read_text()
+
+        assert "视频总结：Test Video" in content
+        assert "## 一句话总结" in content
+        assert "## 详细总结" in content
+        assert "## 时间轴摘要" in content
+        assert "## 关键知识点" in content
+        assert "## 完整转写" in content
+        assert "[Mock转写]" in content
+        assert "[Mock]" in content
+
+    def test_mock_transcript_json_structure(self, tmp_path):
+        from video_summarizer.exporters.json_exporter import export_json
+        from video_summarizer.summarizer.llm_client import MockLLMClient
+        import json
+
+        llm_client = MockLLMClient()
+
+        mock_transcript = [
+            {"start": 0.0, "end": 5.0, "text": "[Mock转写] 第一段内容"},
+            {"start": 5.0, "end": 10.0, "text": "[Mock转写] 第二段内容"},
+        ]
+
+        output_path = export_json(
+            video_id=1,
+            video_title="Test",
+            video_url=None,
+            video_author=None,
+            duration=10.0,
+            transcript=mock_transcript,
+            chunk_summaries=[],
+            final_summary=None,
+            output_dir=tmp_path
+        )
+
+        data = json.loads(Path(output_path).read_text())
+
+        assert "transcript" in data
+        assert len(data["transcript"]) == 2
+        assert data["transcript"][0]["start"] == 0.0
+        assert data["transcript"][0]["end"] == 5.0
+        assert data["transcript"][0]["text"] == "[Mock转写] 第一段内容"
 
 
 class TestDatabase:

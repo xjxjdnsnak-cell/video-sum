@@ -7,11 +7,9 @@ import tempfile
 import typer
 from rich.console import Console
 from rich.table import Table
-from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from .config import settings
 from .db import get_db, init_db
-from .models import Video
 from .media.ffmpeg import extract_audio, get_video_duration, check_ffmpeg_installed, FFmpegError
 from .media.downloader import download_audio, download_subtitles, get_video_info, check_ytdlp_installed, DownloaderError
 from .asr.faster_whisper_engine import FasterWhisperEngine, FasterWhisperError, Segment
@@ -28,16 +26,17 @@ app = typer.Typer(
 console = Console()
 
 
-def check_dependencies():
+def check_dependencies(require_asr: bool = True):
     errors = []
     if not check_ffmpeg_installed():
         errors.append("FFmpeg is not installed. Please install FFmpeg first.")
     if not check_ytdlp_installed():
         errors.append("yt-dlp is not installed. Run: pip install yt-dlp")
-    try:
-        import faster_whisper
-    except ImportError:
-        errors.append("faster-whisper is not installed. Run: pip install faster-whisper")
+    if require_asr:
+        try:
+            import faster_whisper
+        except ImportError:
+            errors.append("faster-whisper is not installed. Run: pip install faster-whisper")
 
     if errors:
         for err in errors:
@@ -68,6 +67,7 @@ def download_model(
 def summarize_local(
     video_path: str = typer.Argument(..., help="本地视频文件路径"),
     llm_provider: str = typer.Option("mock", "--llm-provider", help="LLM provider: mock, openai, ollama"),
+    asr_provider: str = typer.Option("faster-whisper", "--asr-provider", help="ASR provider: faster-whisper, mock"),
     chunk_min: int = typer.Option(3, "--chunk-min", help="Minimum chunk duration in minutes"),
     chunk_max: int = typer.Option(5, "--chunk-max", help="Maximum chunk duration in minutes"),
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output directory"),
@@ -82,13 +82,16 @@ def summarize_local(
         console.print(f"[red]Error: Video file not found: {video_path}[/red]")
         raise typer.Exit(code=1)
 
-    check_dependencies()
+    use_mock_asr = asr_provider.lower() == "mock"
+    check_dependencies(require_asr=not use_mock_asr)
 
     output_dir = Path(output) if output else settings.OUTPUT_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         console.print(f"[cyan]Processing local video: {video_path.name}[/cyan]")
+        if use_mock_asr:
+            console.print(f"[yellow]Using Mock ASR (--asr-provider mock)[/yellow]")
 
         video_id = create_video_record(
             source_type="local",
@@ -118,16 +121,17 @@ def summarize_local(
                 engine = FasterWhisperEngine(
                     model_name=model,
                     device=device,
-                    compute_type="float16" if device == "cuda" else "int8"
+                    compute_type="float16" if device == "cuda" else "int8",
+                    use_mock=use_mock_asr
                 )
                 segments = engine.transcribe(str(audio_path), language=language)
                 transcript_data = [
-                    {"start": s.start, "end": s.end, "text": s.text, "source": "asr"}
+                    {"start": s.start, "end": s.end, "text": s.text, "source": "mock" if use_mock_asr else "asr"}
                     for s in segments
                 ]
                 save_transcript(video_id, transcript_data)
             except FasterWhisperError as e:
-                console.print(f"[red]Whisper error: {e}[/red]")
+                console.print(f"[red]ASR error: {e}[/red]")
                 update_video_status(video_id, "failed")
                 if not keep_audio:
                     audio_path.unlink(missing_ok=True)
@@ -183,6 +187,7 @@ def summarize_local(
 def summarize_url(
     url: str = typer.Argument(..., help="B站视频链接"),
     llm_provider: str = typer.Option("mock", "--llm-provider", help="LLM provider: mock, openai, ollama"),
+    asr_provider: str = typer.Option("faster-whisper", "--asr-provider", help="ASR provider: faster-whisper, mock"),
     chunk_min: int = typer.Option(3, "--chunk-min", help="Minimum chunk duration in minutes"),
     chunk_max: int = typer.Option(5, "--chunk-max", help="Maximum chunk duration in minutes"),
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output directory"),
@@ -191,13 +196,16 @@ def summarize_url(
     language: Optional[str] = typer.Option(None, "--language", "-l", help="Language: zh, en, auto"),
     keep_audio: bool = typer.Option(False, "--keep-audio", help="Keep downloaded audio file"),
 ):
-    check_dependencies()
+    use_mock_asr = asr_provider.lower() == "mock"
+    check_dependencies(require_asr=not use_mock_asr)
 
     output_dir = Path(output) if output else settings.OUTPUT_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         console.print(f"[cyan]Processing URL: {url}[/cyan]")
+        if use_mock_asr:
+            console.print(f"[yellow]Using Mock ASR (--asr-provider mock)[/yellow]")
 
         console.print("[cyan]Fetching video info...[/cyan]")
         try:
@@ -243,16 +251,17 @@ def summarize_url(
                     engine = FasterWhisperEngine(
                         model_name=model,
                         device=device,
-                        compute_type="float16" if device == "cuda" else "int8"
+                        compute_type="float16" if device == "cuda" else "int8",
+                        use_mock=use_mock_asr
                     )
                     segments = engine.transcribe(str(audio_path), language=language)
                     transcript_data = [
-                        {"start": s.start, "end": s.end, "text": s.text, "source": "asr"}
+                        {"start": s.start, "end": s.end, "text": s.text, "source": "mock" if use_mock_asr else "asr"}
                         for s in segments
                     ]
                     save_transcript(video_id, transcript_data)
                 except FasterWhisperError as e:
-                    console.print(f"[red]Whisper error: {e}[/red]")
+                    console.print(f"[red]ASR error: {e}[/red]")
                     update_video_status(video_id, "failed")
                     raise typer.Exit(code=1)
                 finally:
@@ -309,6 +318,7 @@ def transcribe(
     video_path: str = typer.Argument(..., help="本地视频文件路径"),
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file path"),
     format: str = typer.Option("json", "--format", "-f", help="Output format: srt, json, txt"),
+    asr_provider: str = typer.Option("faster-whisper", "--asr-provider", help="ASR provider: faster-whisper, mock"),
     model: str = typer.Option("base", "--model", help="Whisper model: tiny, base, small, medium, large"),
     device: str = typer.Option("cpu", "--device", help="Device: cpu, cuda"),
     language: Optional[str] = typer.Option(None, "--language", "-l", help="Language: zh, en, auto"),
@@ -320,10 +330,13 @@ def transcribe(
         console.print(f"[red]Error: Video file not found: {video_path}[/red]")
         raise typer.Exit(code=1)
 
-    check_dependencies()
+    use_mock_asr = asr_provider.lower() == "mock"
+    check_dependencies(require_asr=not use_mock_asr)
 
     try:
         console.print(f"[cyan]Transcribing: {video_path.name}[/cyan]")
+        if use_mock_asr:
+            console.print(f"[yellow]Using Mock ASR (--asr-provider mock)[/yellow]")
 
         video_id = create_video_record(
             source_type="local",
@@ -351,15 +364,16 @@ def transcribe(
                 engine = FasterWhisperEngine(
                     model_name=model,
                     device=device,
-                    compute_type="float16" if device == "cuda" else "int8"
+                    compute_type="float16" if device == "cuda" else "int8",
+                    use_mock=use_mock_asr
                 )
                 segments = engine.transcribe(str(audio_path), language=language)
                 transcript_data = [
-                    {"start": s.start, "end": s.end, "text": s.text, "source": "asr"}
+                    {"start": s.start, "end": s.end, "text": s.text, "source": "mock" if use_mock_asr else "asr"}
                     for s in segments
                 ]
             except FasterWhisperError as e:
-                console.print(f"[red]Whisper error: {e}[/red]")
+                console.print(f"[red]ASR error: {e}[/red]")
                 update_video_status(video_id, "failed")
                 raise typer.Exit(code=1)
             finally:

@@ -21,7 +21,7 @@ class FasterWhisperError(Exception):
 
 class MockASREngine:
     def transcribe(self, audio_path: str, language: Optional[str] = None) -> List[Segment]:
-        console.print("[yellow]Using mock transcription (Whisper model not available)[/yellow]")
+        console.print("[yellow][Mock ASR] Generating mock transcription[/yellow]")
         return [
             Segment(start=0.0, end=5.0, text="[Mock转写] 这是第一段测试音频内容的转写文本。"),
             Segment(start=5.0, end=10.0, text="[Mock转写] 这是第二段测试音频内容的转写文本，包含了一些测试内容。"),
@@ -56,11 +56,20 @@ class FasterWhisperEngine:
                     device=self.device,
                     compute_type=self.compute_type
                 )
+            except ImportError:
+                raise FasterWhisperError(
+                    f"faster-whisper is not installed. Run: pip install faster-whisper"
+                )
             except Exception as e:
-                console.print(f"[yellow]Warning: Failed to load Whisper model: {e}[/yellow]")
-                console.print("[yellow]Falling back to mock transcription[/yellow]")
-                self.use_mock = True
-                return MockASREngine()
+                raise FasterWhisperError(
+                    f"Failed to load Whisper model '{self.model_name}'.\n"
+                    f"Error: {e}\n\n"
+                    f"解决方案:\n"
+                    f"1. 检查网络连接\n"
+                    f"2. 预下载模型: video-summarizer download-model --model {self.model_name}\n"
+                    f"3. 尝试更小的模型: --model tiny\n"
+                    f"4. 或使用 Mock ASR 测试流程: --asr-provider mock"
+                )
         return self._model
 
     def transcribe(
@@ -74,11 +83,11 @@ class FasterWhisperEngine:
 
         language = language or settings.SRT_LANGUAGE
 
-        try:
-            if self.use_mock or self._model is None:
-                engine = self.model
-                return engine.transcribe(audio_path, language=language)
+        if self.use_mock or self._model is None:
+            engine = self.model
+            return engine.transcribe(audio_path, language=language)
 
+        try:
             segments, info = self._model.transcribe(
                 audio_path,
                 language=language,
@@ -99,6 +108,7 @@ class FasterWhisperEngine:
             return result
 
         except Exception as e:
-            console.print(f"[yellow]Transcription failed with Whisper: {e}[/yellow]")
-            console.print("[yellow]Falling back to mock transcription[/yellow]")
-            return MockASREngine().transcribe(audio_path, language=language)
+            raise FasterWhisperError(
+                f"Transcription failed: {e}\n\n"
+                f"如果需要使用 Mock 转写进行测试，请添加参数: --asr-provider mock"
+            )
