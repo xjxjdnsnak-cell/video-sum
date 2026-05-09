@@ -1,7 +1,7 @@
 # Video Summarizer
 
-> **版本**: v0.4.1-quality-evaluation
-> **目标**: 评估摘要质量，支持回归测试机制
+> **版本**: v0.5.0-local-web-ui
+> **目标**: 本地 Web UI，支持视频上传、链接输入、历史记录和评估
 
 B站/本地视频总结器 - 自动提取音频/字幕，转成文字，按时间戳分段，调用 LLM 生成摘要，最后导出 Markdown 笔记。
 
@@ -76,6 +76,99 @@ video-summarizer clean --temp-only --yes
 
 # 删除所有缓存（包括模型）
 video-summarizer clean --all-cache --yes
+```
+
+---
+
+## Web UI
+
+使用 Streamlit 提供本地 Web 界面。
+
+### 启动 Web UI
+
+```bash
+video-summarizer web
+```
+
+访问地址: http://localhost:8501
+
+### Web UI 功能
+
+#### 1. 新建任务页面
+
+- **本地视频上传**: 支持 MP4, AVI, MOV, MKV, FLV, WMV 格式
+- **B站链接输入**: 支持 BV号、av号、完整链接和短链接
+- **参数选择**:
+  - ASR Provider: faster-whisper / mock
+  - LLM Provider: openai-compatible / ollama / mock
+  - Whisper 模型: tiny / base / small / medium / large
+  - 设备: cpu / cuda / auto
+  - 语言: zh / en / auto
+  - 笔记模板: brief / detailed / study / meeting / tutorial
+- **处理进度**: 显示处理进度和状态
+- **结果展示**: 显示 Markdown 摘要
+
+#### 2. 历史记录页面
+
+- 显示所有处理过的视频
+- 支持搜索和状态筛选
+- 点击查看详情:
+  - Markdown 摘要
+  - 转写 JSON
+  - 基本信息
+
+#### 3. 质量评估入口
+
+- 在结果页点击"运行评估"按钮
+- 显示总分和各项评分
+- 显示发现的问题
+- 显示修改建议
+- 支持下载评估报告
+
+### Web UI 界面预览
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  🎬 Video Summarizer                                       │
+│  B站/本地视频总结器                                          │
+├─────────────────────────────────────────────────────────────┤
+│  ✅ 环境检查通过                                             │
+├───────────────────┬───────────────────────────────────────┤
+│ 📤 新建任务 │ 📋 历史记录                                    │
+├─────────────────────────────────────────────────────────────┤
+│ 选择输入类型: [📁 本地视频] [🔗 B站链接]                       │
+│                                                             │
+│ 处理参数:                                                    │
+│ ASR Provider: [faster-whisper ▼]                           │
+│ LLM Provider: [mock ▼]                                     │
+│ Whisper 模型: [base ▼]                                     │
+│ 设备: [cpu ▼]                                              │
+│ 语言: [auto ▼]                                              │
+│ 笔记模板: [📄 详细笔记 ▼]                                    │
+│                                                             │
+│ [🚀 开始处理]                                                │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 本地视频处理流程
+
+```bash
+# 1. 使用 Web UI 上传视频
+video-summarizer web
+
+# 2. 或使用命令行处理
+video-summarizer summarize-local ./video.mp4 \
+  --asr-provider mock \
+  --llm-provider mock \
+  --note-style study
+
+# 3. 查看处理状态
+video-summarizer status VIDEO_ID
+
+# 4. 导出结果
+video-summarizer export VIDEO_ID --format markdown
 ```
 
 ---
@@ -235,6 +328,9 @@ video-summarizer transcribe ./test.mp4 \
 # 诊断
 video-summarizer doctor                    # 环境检查
 
+# Web UI
+video-summarizer web                        # 启动 Web UI
+
 # B站工具
 video-summarizer inspect-url <URL/BV号>    # 检查视频信息
 video-summarizer summarize-url <URL/BV号>  # 总结 B站视频
@@ -248,6 +344,9 @@ video-summarizer clean [选项]              # 清理缓存
 video-summarizer summarize-local <路径>    # 总结本地视频
 video-summarizer transcribe <路径>         # 仅转写
 video-summarizer export <VIDEO_ID>         # 导出已有视频
+
+# 评估
+video-summarizer evaluate <VIDEO_ID>      # 评估摘要质量
 
 # 模型
 video-summarizer download-model           # 下载 Whisper 模型
@@ -386,6 +485,7 @@ video-summarizer evaluate VIDEO_ID --format json
 - **真实 ASR**: 需要在有网络的环境中验证 Whisper 模型下载
 - **B站链接**: 部分视频需要登录 Cookie 才能访问，建议使用 `--cookies` 或 `--cookies-from-browser` 参数
 - **付费视频**: 本工具不承诺绕过付费限制，付费内容需要购买后才能观看
+- **Web UI**: 当前仅支持单机使用，不支持云端部署和多人协作
 
 ---
 
@@ -412,6 +512,10 @@ video_summarizer/
 │   ├── markdown.py          # Markdown 导出
 │   ├── srt.py             # SRT 字幕导出
 │   └── json_exporter.py   # JSON 导出
+├── evaluator/
+│   └── evaluate.py          # 质量评估
+├── web_ui/
+│   └── app.py               # Streamlit Web UI
 └── utils/
     └── timefmt.py         # 时间戳格式化
 ```

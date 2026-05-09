@@ -1,6 +1,6 @@
 [project]
 name = "video-summarizer"
-version = "0.4.1-quality-evaluation"
+version = "0.5.0"
 description = "B站/本地视频总结器 - 自动提取音频/字幕，转成文字并生成摘要"
 authors = [{name = "Developer"}]
 requires-python = ">=3.10"
@@ -16,6 +16,7 @@ dependencies = [
     "srt>=3.5.0",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "streamlit>=1.30.0",
 ]
 
 [project.scripts]

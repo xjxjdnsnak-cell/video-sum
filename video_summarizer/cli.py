@@ -66,6 +66,7 @@ def main():
 
 @app.command("doctor")
 def doctor():
+    """检查环境配置"""
     console.print(Panel("[bold cyan]Environment Diagnostic Report[/bold cyan]", expand=False))
     console.print()
 
@@ -112,6 +113,18 @@ def doctor():
     else:
         console.print("[bold yellow]Some checks failed. Please fix the issues above.[/bold yellow]")
         raise typer.Exit(code=1)
+
+
+@app.command("web")
+def web():
+    """启动 Web UI (Streamlit)"""
+    import subprocess
+    subprocess.run([
+        sys.executable, "-m", "streamlit", "run",
+        str(Path(__file__).parent / "web_ui" / "app.py"),
+        "--server.port", "8501",
+        "--browser.gatherUsageStats", "false"
+    ])
 
 
 @app.command("inspect-url")
