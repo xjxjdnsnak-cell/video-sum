@@ -127,6 +127,39 @@ class TestASREngine:
         engine_real = FasterWhisperEngine(use_mock=False)
         assert engine_real.use_mock == False
 
+    def test_mock_asr_does_not_affect_faster_whisper(self):
+        from video_summarizer.asr.faster_whisper_engine import FasterWhisperEngine
+
+        engine_mock = FasterWhisperEngine(use_mock=True)
+        assert engine_mock.use_mock == True
+        assert not hasattr(engine_mock, '_model') or engine_mock._model is None
+
+        engine_real = FasterWhisperEngine(use_mock=False)
+        assert engine_real.use_mock == False
+        assert not hasattr(engine_real, '_model') or engine_real._model is None
+
+        engine_mock.model
+        assert not hasattr(engine_mock, '_model') or engine_mock._model is None
+
+    def test_model_dir_parameter_passed(self):
+        from video_summarizer.asr.faster_whisper_engine import FasterWhisperEngine
+
+        engine = FasterWhisperEngine(
+            model_name="tiny",
+            model_dir="/custom/model/path"
+        )
+        assert engine.model_dir == Path("/custom/model/path")
+        assert engine.model_name == "tiny"
+
+    def test_device_auto_detection(self):
+        from video_summarizer.asr.faster_whisper_engine import FasterWhisperEngine
+
+        engine_cpu = FasterWhisperEngine(device="cpu")
+        assert engine_cpu.device == "cpu"
+
+        engine_cuda = FasterWhisperEngine(device="cuda")
+        assert engine_cuda.device == "cuda"
+
 
 class TestChunker:
     def test_create_chunks_from_segments(self):

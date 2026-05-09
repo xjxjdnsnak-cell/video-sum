@@ -51,15 +51,27 @@ def main():
 
 @app.command("download-model")
 def download_model(
-    model: str = typer.Option("base", "--model", "-m", help="Whisper model to download: tiny, base, small, medium, large"),
+    model: str = typer.Option("base", "--model", "-m", help="Whisper model: tiny, base, small, medium, large"),
+    model_dir: Optional[str] = typer.Option(None, "--model-dir", help="Local model cache directory"),
 ):
     console.print(f"[cyan]Downloading Whisper model: {model}[/cyan]")
+    if model_dir:
+        console.print(f"[cyan]Model directory: {model_dir}[/cyan]")
+
     try:
-        engine = FasterWhisperEngine(model_name=model)
+        engine = FasterWhisperEngine(
+            model_name=model,
+            model_dir=model_dir
+        )
         _ = engine.model
         console.print(f"[green]Model {model} downloaded successfully![/green]")
+        if model_dir:
+            console.print(f"[green]Saved to: {model_dir}[/green]")
+    except FasterWhisperError as e:
+        console.print(f"[red]ASR error: {e}[/red]")
+        raise typer.Exit(code=1)
     except Exception as e:
-        console.print(f"[red]Failed to download model: {e}[/red]")
+        console.print(f"[red]Failed: {e}[/red]")
         raise typer.Exit(code=1)
 
 
@@ -72,8 +84,9 @@ def summarize_local(
     chunk_max: int = typer.Option(5, "--chunk-max", help="Maximum chunk duration in minutes"),
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output directory"),
     model: str = typer.Option("base", "--model", help="Whisper model: tiny, base, small, medium, large"),
-    device: str = typer.Option("cpu", "--device", help="Device: cpu, cuda"),
+    device: str = typer.Option("cpu", "--device", help="Device: cpu, cuda, auto"),
     language: Optional[str] = typer.Option(None, "--language", "-l", help="Language: zh, en, auto"),
+    model_dir: Optional[str] = typer.Option(None, "--model-dir", help="Local model cache directory"),
     keep_audio: bool = typer.Option(False, "--keep-audio", help="Keep extracted audio file"),
     force_transcribe: bool = typer.Option(False, "--force", help="Force re-transcribe even if transcript exists"),
 ):
@@ -122,7 +135,9 @@ def summarize_local(
                     model_name=model,
                     device=device,
                     compute_type="float16" if device == "cuda" else "int8",
-                    use_mock=use_mock_asr
+                    use_mock=use_mock_asr,
+                    model_dir=model_dir,
+                    language=language
                 )
                 segments = engine.transcribe(str(audio_path), language=language)
                 transcript_data = [
@@ -192,8 +207,9 @@ def summarize_url(
     chunk_max: int = typer.Option(5, "--chunk-max", help="Maximum chunk duration in minutes"),
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output directory"),
     model: str = typer.Option("base", "--model", help="Whisper model: tiny, base, small, medium, large"),
-    device: str = typer.Option("cpu", "--device", help="Device: cpu, cuda"),
+    device: str = typer.Option("cpu", "--device", help="Device: cpu, cuda, auto"),
     language: Optional[str] = typer.Option(None, "--language", "-l", help="Language: zh, en, auto"),
+    model_dir: Optional[str] = typer.Option(None, "--model-dir", help="Local model cache directory"),
     keep_audio: bool = typer.Option(False, "--keep-audio", help="Keep downloaded audio file"),
 ):
     use_mock_asr = asr_provider.lower() == "mock"
@@ -252,7 +268,9 @@ def summarize_url(
                         model_name=model,
                         device=device,
                         compute_type="float16" if device == "cuda" else "int8",
-                        use_mock=use_mock_asr
+                        use_mock=use_mock_asr,
+                        model_dir=model_dir,
+                        language=language
                     )
                     segments = engine.transcribe(str(audio_path), language=language)
                     transcript_data = [
@@ -320,8 +338,9 @@ def transcribe(
     format: str = typer.Option("json", "--format", "-f", help="Output format: srt, json, txt"),
     asr_provider: str = typer.Option("faster-whisper", "--asr-provider", help="ASR provider: faster-whisper, mock"),
     model: str = typer.Option("base", "--model", help="Whisper model: tiny, base, small, medium, large"),
-    device: str = typer.Option("cpu", "--device", help="Device: cpu, cuda"),
+    device: str = typer.Option("cpu", "--device", help="Device: cpu, cuda, auto"),
     language: Optional[str] = typer.Option(None, "--language", "-l", help="Language: zh, en, auto"),
+    model_dir: Optional[str] = typer.Option(None, "--model-dir", help="Local model cache directory"),
     keep_audio: bool = typer.Option(False, "--keep-audio", help="Keep extracted audio file"),
     force: bool = typer.Option(False, "--force", "-F", help="Force re-transcribe"),
 ):
@@ -365,7 +384,9 @@ def transcribe(
                     model_name=model,
                     device=device,
                     compute_type="float16" if device == "cuda" else "int8",
-                    use_mock=use_mock_asr
+                    use_mock=use_mock_asr,
+                    model_dir=model_dir,
+                    language=language
                 )
                 segments = engine.transcribe(str(audio_path), language=language)
                 transcript_data = [

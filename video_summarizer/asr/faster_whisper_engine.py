@@ -34,13 +34,30 @@ class FasterWhisperEngine:
         model_name: Optional[str] = None,
         device: Optional[str] = None,
         compute_type: Optional[str] = None,
-        use_mock: bool = False
+        use_mock: bool = False,
+        model_dir: Optional[str] = None,
+        language: Optional[str] = None
     ):
         self.model_name = model_name or settings.WHISPER_MODEL
-        self.device = device or settings.WHISPER_DEVICE
+        self.device = self._resolve_device(device or settings.WHISPER_DEVICE)
         self.compute_type = compute_type or settings.WHISPER_COMPUTE_TYPE
         self.use_mock = use_mock
+        self.model_dir = Path(model_dir) if model_dir else None
+        self.language = language
         self._model = None
+
+    def _resolve_device(self, device: str) -> str:
+        if device == "auto":
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    console.print("[dim]Auto-detected CUDA, using GPU[/dim]")
+                    return "cuda"
+            except ImportError:
+                pass
+            console.print("[dim]Auto-detected CPU[/dim]")
+            return "cpu"
+        return device
 
     @property
     def model(self):
@@ -49,12 +66,16 @@ class FasterWhisperEngine:
 
         if self._model is None:
             console.print(f"[dim]Loading Whisper model: {self.model_name} ({self.device})[/dim]")
+            if self.model_dir:
+                console.print(f"[dim]Model directory: {self.model_dir}[/dim]")
+
             try:
                 from faster_whisper import WhisperModel
                 self._model = WhisperModel(
                     self.model_name,
                     device=self.device,
-                    compute_type=self.compute_type
+                    compute_type=self.compute_type,
+                    download_root=str(self.model_dir) if self.model_dir else None
                 )
             except ImportError:
                 raise FasterWhisperError(
@@ -81,7 +102,7 @@ class FasterWhisperEngine:
         if not Path(audio_path).exists():
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-        language = language or settings.SRT_LANGUAGE
+        language = language or self.language or settings.SRT_LANGUAGE
 
         if self.use_mock or self._model is None:
             engine = self.model
@@ -90,7 +111,7 @@ class FasterWhisperEngine:
         try:
             segments, info = self._model.transcribe(
                 audio_path,
-                language=language,
+                language=language if language != "auto" else None,
                 task=task,
                 beam_size=5,
                 vad_filter=True

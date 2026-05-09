@@ -1,7 +1,7 @@
 # Video Summarizer
 
-> **版本**: v0.1.0-mvp
-> **下一步**: v0.2.0-real-asr - 让 faster-whisper 在真实视频上稳定转写
+> **版本**: v0.2.0-real-asr
+> **目标**: 让 faster-whisper 在真实视频上稳定转写
 
 B站/本地视频总结器 - 自动提取音频/字幕，转成文字，按时间戳分段，调用 LLM 生成摘要，最后导出 Markdown 笔记。
 
@@ -17,9 +17,11 @@ pip install -e .
 - FFmpeg
 - yt-dlp
 
-## 验收测试
+---
 
-### 1. Mock 流程验收（无需网络和模型下载）
+## 快速开始
+
+### 1. Mock 流程测试（无需网络）
 
 用于测试完整流程，不需要真实 ASR 模型：
 
@@ -32,75 +34,83 @@ video-summarizer summarize-local ./test.mp4 \
 
 # 仅转写（Mock ASR）
 video-summarizer transcribe ./test.mp4 \
-  --asr-provider mock \
-  --output ./outputs/transcript.json
+  --asr-provider mock
 ```
 
-预期输出：
-- `outputs/test.md` - Markdown 总结（包含：一句话总结、详细总结、时间轴摘要、关键知识点、完整转写）
-- `outputs/test.json` - JSON 结构数据
-- `outputs/test.srt` - SRT 字幕
+### 2. 真实 ASR 转写验收
 
-### 2. 真实 ASR 验收（需要网络下载 Whisper 模型）
+在有网络的环境中，依次执行：
 
 ```bash
-# 先预下载模型（推荐）
-video-summarizer download-model --model base
+# Step 1: 预下载模型（可选，但推荐）
+video-summarizer download-model --model tiny
 
-# 使用真实 Whisper ASR + Mock LLM
-video-summarizer summarize-local ./test.mp4 \
-  --asr-provider faster-whisper \
-  --llm-provider mock \
-  --output ./outputs
+# 或指定本地模型缓存目录
+video-summarizer download-model --model tiny --model-dir ./models
 
-# 或使用真实 Whisper ASR + 真实 LLM
-video-summarizer summarize-local ./test.mp4 \
+# Step 2: 转写视频
+video-summarizer transcribe ./test.mp4 \
   --asr-provider faster-whisper \
-  --llm-provider openai \
   --model tiny \
-  --output ./outputs
+  --device cpu
+
+# 成功标准：输出 JSON 和 SRT
+# [
+#   {
+#     "start": 0.0,
+#     "end": 3.2,
+#     "text": "真实识别出来的内容"
+#   }
+# ]
 ```
 
-如果 Whisper 模型下载失败，会提示：
-```
-解决方案:
-1. 检查网络连接
-2. 预下载模型: video-summarizer download-model --model tiny
-3. 尝试更小的模型: --model tiny
-4. 或使用 Mock ASR 测试流程: --asr-provider mock
-```
-
-### 3. B站链接验收（需要网络）
+### 3. B站链接测试
 
 ```bash
-# 总结 B站视频
 video-summarizer summarize-url "https://www.bilibili.com/video/BVxxx" \
-  --asr-provider faster-whisper \
-  --llm-provider mock \
-  --output ./outputs
+  --asr-provider mock \
+  --llm-provider mock
 ```
 
-如果 B站访问受限（HTTP 412/403），会提示需要设置 Cookie：
+如果遇到 HTTP 412/403，需要设置 Cookie：
 ```
-B站访问受限 (HTTP 412)。可能需要登录或设置Cookie。
 解决方案：
 1. 在浏览器中登录B站
 2. 导出Cookie为Netscape格式
 3. 保存到 ~/.video_summarizer/cookies.txt
 ```
 
+---
+
 ## 参数说明
+
+### ASR 参数
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `--asr-provider` | faster-whisper | ASR 引擎：faster-whisper, mock |
-| `--llm-provider` | mock | LLM 引擎：mock, openai, ollama |
 | `--model` | base | Whisper 模型：tiny, base, small, medium, large |
-| `--device` | cpu | 设备：cpu, cuda |
+| `--device` | cpu | 设备：cpu, cuda, auto |
 | `--language` | zh | 语言：zh, en, auto |
+| `--model-dir` | None | 本地模型缓存目录 |
+
+### LLM 参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--llm-provider` | mock | LLM 引擎：mock, openai, ollama |
+
+### 其他参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
 | `--output` | ~ | 输出目录 |
 | `--keep-audio` | False | 保留中间音频文件 |
 | `--force` | False | 强制重新转写 |
+| `--chunk-min` | 3 | 摘要分块最小分钟数 |
+| `--chunk-max` | 5 | 摘要分块最大分钟数 |
+
+---
 
 ## 命令
 
@@ -124,6 +134,8 @@ video-summarizer list
 video-summarizer download-model [参数]
 ```
 
+---
+
 ## 配置
 
 复制 `.env.example` 为 `.env` 并配置：
@@ -142,6 +154,8 @@ CHUNK_DURATION_MIN=3
 CHUNK_DURATION_MAX=5
 ```
 
+---
+
 ## 测试
 
 ```bash
@@ -155,4 +169,49 @@ pytest tests/ -v
 - `subtitle_parser` - SRT 字幕解析
 - `markdown_exporter` - Markdown 导出
 - `mock pipeline` - Mock ASR + Mock LLM 完整流程
-- `fallback 保护` - faster-whisper 失败时不会自动 fallback
+- `ASR 隔离` - Mock ASR 不影响 Faster-Whisper
+- `fallback 保护` - Faster-Whisper 失败时不会自动 fallback
+- `model_dir` - 本地模型目录参数传递
+
+---
+
+## 错误处理
+
+如果 Whisper 模型下载失败：
+
+```
+解决方案:
+1. 检查网络连接
+2. 预下载模型: video-summarizer download-model --model tiny
+3. 尝试更小的模型: --model tiny
+4. 或使用 Mock ASR 测试流程: --asr-provider mock
+```
+
+---
+
+## 项目结构
+
+```
+video_summarizer/
+├── cli.py                    # CLI 主入口
+├── config.py                 # 配置管理
+├── db.py                     # SQLite 数据库
+├── models.py                 # 数据模型
+├── media/
+│   ├── ffmpeg.py           # FFmpeg 音频提取
+│   └── downloader.py       # yt-dlp 下载器
+├── asr/
+│   ├── faster_whisper_engine.py  # Whisper 引擎
+│   └── subtitle_parser.py       # SRT 字幕解析
+├── summarizer/
+│   ├── chunker.py          # 文本分块
+│   ├── llm_client.py       # LLM 客户端
+│   ├── pipeline.py         # 摘要生成管道
+│   └── prompts.py          # 提示词模板
+├── exporters/
+│   ├── markdown.py          # Markdown 导出
+│   ├── srt.py             # SRT 字幕导出
+│   └── json_exporter.py   # JSON 导出
+└── utils/
+    └── timefmt.py         # 时间戳格式化
+```
