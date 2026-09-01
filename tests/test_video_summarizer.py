@@ -1009,12 +1009,14 @@ class TestCreateVideoRecord:
 
 class TestWebUIImportsFromDB:
     def test_web_ui_does_not_import_create_video_record_from_cli(self):
-        with open("/workspace/video_summarizer/web_ui/app.py", "r") as f:
+        app_path = Path(__file__).resolve().parent.parent / "video_summarizer" / "web_ui" / "app.py"
+        with open(app_path, "r") as f:
             content = f.read()
         assert "from video_summarizer.cli import create_video_record" not in content
         assert "from video_summarizer.cli import update_video_duration" not in content
 
     def test_web_ui_imports_create_video_record_from_db(self):
-        with open("/workspace/video_summarizer/web_ui/app.py", "r") as f:
+        app_path = Path(__file__).resolve().parent.parent / "video_summarizer" / "web_ui" / "app.py"
+        with open(app_path, "r") as f:
             content = f.read()
         assert "from video_summarizer.db import" in content

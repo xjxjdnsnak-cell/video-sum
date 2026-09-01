@@ -55,6 +55,11 @@ class BaseLLMClient(ABC):
     ) -> List[Dict]:
         pass
 
+    @abstractmethod
+    def generate(self, prompt: str) -> str:
+        """Single-turn completion: send the prompt as the user message and return the content string."""
+        pass
+
 
 class MockLLMClient(BaseLLMClient):
     def summarize_chunk(self, text: str, start_time: str, end_time: str) -> Dict:
@@ -210,6 +215,12 @@ class MockLLMClient(BaseLLMClient):
             }
         ]
 
+    def generate(self, prompt: str) -> str:
+        return (
+            '{"answer": "[Mock] 这是基于视频内容的模拟回答（当前为 Mock 模式，未调用真实 LLM）。", '
+            '"evidence": [], "cited_timestamps": [], "uncertainty": false}'
+        )
+
 
 def format_timestamp(seconds: float) -> str:
     minutes = int(seconds // 60)
@@ -251,6 +262,18 @@ class OpenAILLMClient(BaseLLMClient):
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
+                temperature=0.7,
+                max_tokens=2000
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            raise LLMError(f"OpenAI API call failed: {e}")
+
+    def generate(self, prompt: str) -> str:
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
                 max_tokens=2000
             )
@@ -388,7 +411,7 @@ class OllamaLLMClient(BaseLLMClient):
         self.base_url = base_url
         self.model = model
         self.client = OpenAI(
-            base_url=f"{base_url}/api",
+            base_url=f"{base_url}/v1",
             api_key="ollama"
         )
 
@@ -400,6 +423,17 @@ class OllamaLLMClient(BaseLLMClient):
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
+                stream=False
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            raise LLMError(f"Ollama API call failed: {e}")
+
+    def generate(self, prompt: str) -> str:
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
                 stream=False
             )
             return response.choices[0].message.content

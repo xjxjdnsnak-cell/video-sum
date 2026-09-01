@@ -3,6 +3,8 @@ from pathlib import Path
 from typing import List, Optional, Dict, Union
 from datetime import datetime
 
+from ..utils.filename import sanitize_filename
+
 
 def export_json(
     video_id: int,
@@ -37,12 +39,12 @@ def export_json(
         if output_filename:
             output_path = output_dir / output_filename
         else:
-            safe_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in video_title)[:50]
+            safe_title = sanitize_filename(video_title)
             output_path = output_dir / f"{safe_title}.json"
     else:
         from ..config import settings
         settings.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        safe_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in video_title)[:50]
+        safe_title = sanitize_filename(video_title)
         output_path = settings.OUTPUT_DIR / f"{safe_title}.json"
 
     data = {

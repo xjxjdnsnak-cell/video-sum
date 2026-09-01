@@ -20,6 +20,7 @@ from video_summarizer.media.downloader import check_ytdlp_installed
 from video_summarizer.exporters.markdown import export_markdown
 from video_summarizer.exporters.json_exporter import export_json
 from video_summarizer.exporters.srt import export_srt
+from video_summarizer.utils.filename import sanitize_filename
 from video_summarizer.summarizer.prompts import NoteStyle
 from video_summarizer.search.evidence_retriever import (
     check_fts5_support, init_fts_tables, rebuild_all_indexes,
@@ -335,7 +336,9 @@ def process_local_video(
         
         update_video_stage(video_id, "audio_extracted")
         
-        audio_path = Path(tempfile.gettempdir()) / f"video_summarizer_{video_id}.wav"
+        audio_cache_dir = settings.OUTPUT_DIR / "audio_cache"
+        audio_cache_dir.mkdir(parents=True, exist_ok=True)
+        audio_path = audio_cache_dir / f"video_summarizer_{video_id}.wav"
         extract_audio(str(video_path), str(audio_path))
         
         update_video_stage(video_id, "transcribed")
@@ -689,7 +692,8 @@ def render_video_detail(video_id):
                             terms=terms
                         )
                     else:
-                        output_path = export_srt(transcript, f"{info.get('title', 'video')}.srt")
+                        safe_title = sanitize_filename(info.get('title', 'video'))
+                        output_path = export_srt(transcript, str(settings.OUTPUT_DIR / f"{safe_title}.srt"))
                     
                     st.success(f"已导出到: {output_path}")
                     

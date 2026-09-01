@@ -30,6 +30,7 @@ from .summarizer.prompts import NoteStyle
 from .exporters.markdown import export_markdown
 from .exporters.srt import export_srt
 from .exporters.json_exporter import export_json
+from .utils.filename import sanitize_filename
 from .search.evidence_retriever import (
     check_fts5_support, init_fts_tables, rebuild_all_indexes,
     search_fts, search_like, get_evidence,
@@ -251,9 +252,9 @@ def status(video_id: int = typer.Argument(..., help="视频ID")):
 
 @app.command("clean")
 def clean(
-    temp_only: bool = typer.Option(False, "--temp-only", help="Only delete temporary audio/cache files"),
+    temp_only: bool = typer.Option(False, "--temp-only", help="Only delete cached audio files (OUTPUT_DIR/audio_cache) and run logs"),
     video_id: Optional[int] = typer.Option(None, "--video-id", help="Clean specific video's data"),
-    all_cache: bool = typer.Option(False, "--all-cache", help="Delete all cached models and temp files"),
+    all_cache: bool = typer.Option(False, "--all-cache", help="Delete tool-owned caches only: OUTPUT_DIR/audio_cache and OUTPUT_DIR/logs (shared ~/.cache dirs of other tools are NOT touched)"),
     dry_run: bool = typer.Option(True, "--dry-run", help="Show what would be deleted without actually deleting"),
     yes: bool = typer.Option(False, "--yes", help="Actually perform the deletion"),
 ):
@@ -266,15 +267,12 @@ def clean(
 
     if all_cache:
         cache_dirs = [
-            Path.home() / ".cache" / "huggingface",
-            Path.home() / ".cache" / "torch",
+            settings.OUTPUT_DIR / "audio_cache",
             settings.OUTPUT_DIR / "logs",
         ]
         for d in cache_dirs:
             if d.exists():
                 dirs_to_delete.append(d)
-        temp_audio_files = list(Path(tempfile.gettempdir()).glob("video_summarizer_*.wav"))
-        files_to_delete.extend(temp_audio_files)
 
     if video_id:
         info = get_video_info(video_id)
@@ -285,7 +283,8 @@ def clean(
                     files_to_delete.append(Path(path))
 
     if temp_only:
-        temp_audio_files = list(Path(tempfile.gettempdir()).glob("video_summarizer_*.wav"))
+        audio_cache_dir = settings.OUTPUT_DIR / "audio_cache"
+        temp_audio_files = list(audio_cache_dir.glob("video_summarizer_*.wav"))
         files_to_delete.extend(temp_audio_files)
         log_files = list(settings.OUTPUT_DIR.glob("logs/run-*.log")) if settings.OUTPUT_DIR.exists() else []
         files_to_delete.extend(log_files)
@@ -495,7 +494,9 @@ def _run_summarize(
             duration = get_video_duration(video_path_or_url)
             update_video_duration(video_id, duration)
 
-            audio_path = Path(tempfile.gettempdir()) / f"video_summarizer_{video_id}.wav"
+            audio_cache_dir = settings.OUTPUT_DIR / "audio_cache"
+            audio_cache_dir.mkdir(parents=True, exist_ok=True)
+            audio_path = audio_cache_dir / f"video_summarizer_{video_id}.wav"
             if Path(audio_path).exists() and not force:
                 console.print(f"[green]Using cached audio: {audio_path}[/green]")
                 logger.info(f"Using cached audio for video {video_id}")
@@ -571,7 +572,7 @@ def _run_summarize(
             note_style=note_style.value,
             output_dir=output_dir
         )
-        srt_path = export_srt(transcript_data, output_dir / f"{video_title[:50]}.srt")
+        srt_path = export_srt(transcript_data, output_dir / f"{sanitize_filename(video_title)}.srt")
 
         update_video_outputs(video_id, md_path, json_path, srt_path)
         update_video_status(video_id, "completed", "exported")

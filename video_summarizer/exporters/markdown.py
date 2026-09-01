@@ -4,6 +4,7 @@ from datetime import datetime
 
 from ..config import settings
 from ..utils.timefmt import format_timestamp
+from ..utils.filename import sanitize_filename
 from ..summarizer.prompts import NoteStyle
 
 
@@ -30,11 +31,11 @@ def export_markdown(
     elif output_dir is not None:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        safe_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in video_title)[:50]
+        safe_title = sanitize_filename(video_title)
         output_path = output_dir / f"{safe_title}.md"
     else:
         settings.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        safe_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in video_title)[:50]
+        safe_title = sanitize_filename(video_title)
         output_path = settings.OUTPUT_DIR / f"{safe_title}.md"
 
     note_style_labels = {
