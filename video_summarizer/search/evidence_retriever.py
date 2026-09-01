@@ -4,7 +4,7 @@ from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 
 from ..config import settings
-from ..db import get_db_connection
+from ..db import get_db
 
 
 @dataclass
@@ -40,7 +40,7 @@ def check_fts5_support() -> bool:
 
 
 def init_fts_tables():
-    with get_db_connection() as conn:
+    with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             CREATE VIRTUAL TABLE IF NOT EXISTS fts_transcripts USING fts5(
@@ -71,7 +71,7 @@ def init_fts_tables():
 
 
 def rebuild_transcript_index():
-    with get_db_connection() as conn:
+    with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM fts_transcripts")
         cursor.execute("""
@@ -83,7 +83,7 @@ def rebuild_transcript_index():
 
 
 def rebuild_summary_index():
-    with get_db_connection() as conn:
+    with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM fts_summaries")
         cursor.execute("""
@@ -95,7 +95,7 @@ def rebuild_summary_index():
 
 
 def rebuild_final_index():
-    with get_db_connection() as conn:
+    with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM fts_final")
         cursor.execute("""
@@ -144,7 +144,7 @@ def search_fts(
     prepared_query = _prepare_query(query)
     terms = re.findall(r'\w+', query.lower())
     
-    with get_db_connection() as conn:
+    with get_db() as conn:
         cursor = conn.cursor()
         
         if video_id:
@@ -261,7 +261,7 @@ def search_like(
     like_pattern = f"%{query}%"
     terms = re.findall(r'\w+', query.lower())
     
-    with get_db_connection() as conn:
+    with get_db() as conn:
         cursor = conn.cursor()
         
         if video_id:
@@ -364,7 +364,7 @@ def get_evidence(
 
 
 def get_transcript_for_qa(video_id: int) -> List[Dict[str, Any]]:
-    with get_db_connection() as conn:
+    with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT start, "end", text
@@ -376,7 +376,7 @@ def get_transcript_for_qa(video_id: int) -> List[Dict[str, Any]]:
 
 
 def get_summary_for_qa(video_id: int) -> List[Dict[str, Any]]:
-    with get_db_connection() as conn:
+    with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT start, "end", summary
@@ -388,7 +388,7 @@ def get_summary_for_qa(video_id: int) -> List[Dict[str, Any]]:
 
 
 def get_final_summary_for_qa(video_id: int) -> Optional[Dict[str, Any]]:
-    with get_db_connection() as conn:
+    with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT one_sentence_summary, detailed_summary, key_points, questions
