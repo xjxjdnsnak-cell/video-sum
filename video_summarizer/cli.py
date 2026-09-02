@@ -88,10 +88,12 @@ def doctor():
     except ImportError:
         checks.append(("faster-whisper", "NOT installed", False))
 
-    checks.append(("FFmpeg", "installed" if check_ffmpeg_installed() else "NOT installed",
-                   check_ffmpeg_installed()))
-    checks.append(("yt-dlp", "installed" if check_ytdlp_installed() else "NOT installed",
-                   check_ytdlp_installed()))
+    # Each external tool is probed exactly once: the check subprocess is slow,
+    # and the value column and the ok column show the same result.
+    ffmpeg_ok = check_ffmpeg_installed()
+    checks.append(("FFmpeg", "installed" if ffmpeg_ok else "NOT installed", ffmpeg_ok))
+    ytdlp_ok = check_ytdlp_installed()
+    checks.append(("yt-dlp", "installed" if ytdlp_ok else "NOT installed", ytdlp_ok))
 
     db_dir = settings.DB_PATH.parent
     db_writable = os.access(str(db_dir), os.W_OK)
@@ -123,13 +125,33 @@ def doctor():
         raise typer.Exit(code=1)
 
 
+LOOPBACK_ADDRESSES = ("localhost", "127.0.0.1", "::1")
+
+
 @app.command("web")
-def web():
+def web(
+    server_address: str = typer.Option(
+        "localhost", "--server.address",
+        help="Streamlit server address. Keep the default localhost: the Web UI has no authentication."
+    ),
+):
     """启动 Web UI (Streamlit)"""
     import subprocess
+
+    if server_address not in LOOPBACK_ADDRESSES:
+        console.print(Panel(
+            "[bold red]安全警告：Web UI 没有任何鉴权/会话控制。[/bold red]\n"
+            f"你正在将其绑定到 [bold]{server_address}[/bold]（非 loopback），"
+            "网络上的任何人都可以读取本地数据库中的全部历史记录与转写文本，"
+            "并以你的身份触发 ffmpeg / yt-dlp / LLM 调用。",
+            title="Unauthenticated Web UI",
+            expand=False,
+        ))
+
     subprocess.run([
         sys.executable, "-m", "streamlit", "run",
         str(Path(__file__).parent / "web_ui" / "app.py"),
+        "--server.address", server_address,
         "--server.port", "8501",
         "--browser.gatherUsageStats", "false"
     ])
@@ -394,6 +416,7 @@ def _run_summarize(
     download_subtitle_only: bool = False,
     download_audio_only: bool = False,
     note_style: NoteStyle = NoteStyle.DETAILED,
+    allow_any_url: bool = False,
 ):
     use_mock_asr = asr_provider.lower() == "mock"
     check_dependencies(require_asr=not use_mock_asr)
@@ -404,6 +427,17 @@ def _run_summarize(
     try:
         if is_url:
             console.print(f"[cyan]Processing URL: {video_path_or_url}[/cyan]")
+
+            # S-4: yt-dlp would send any cookies we hold to whatever host the
+            # URL points at, so non-bilibili domains are opt-in only.
+            if not is_bilibili_url(video_path_or_url) and not allow_any_url:
+                console.print(
+                    "[red]拒绝处理：该 URL 不是B站链接（仅支持 bilibili.com / b23.tv / BV号 / av号）。[/red]"
+                )
+                console.print("[yellow]如确认要处理其他域名的 URL，请加 --allow-any-url 参数。[/yellow]")
+                logger.info(f"Refused non-bilibili URL without --allow-any-url: {video_path_or_url}")
+                raise typer.Exit(code=1)
+
             if use_mock_asr:
                 console.print(f"[yellow]Using Mock ASR (--asr-provider mock)[/yellow]")
 
@@ -764,6 +798,8 @@ def summarize_url(
     download_audio_only: bool = typer.Option(False, "--download-audio-only", help="只下载音频，不进行字幕提取"),
     note_style: NoteStyle = typer.Option(NoteStyle.DETAILED, "--note-style", 
                                         help="笔记模板: brief, detailed, study, meeting, tutorial"),
+    allow_any_url: bool = typer.Option(False, "--allow-any-url",
+                                       help="允许处理非B站域名的URL（默认仅允许 bilibili.com / b23.tv / BV号 / av号）"),
 ):
     _run_summarize(
         video_path_or_url=url,
@@ -786,7 +822,8 @@ def summarize_url(
         user_agent=user_agent,
         download_subtitle_only=download_subtitle_only,
         download_audio_only=download_audio_only,
-        note_style=note_style
+        note_style=note_style,
+        allow_any_url=allow_any_url
     )
 
 

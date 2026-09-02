@@ -54,6 +54,26 @@ class TestQAPrompt:
         assert "Hello world" in prompt
         assert "Summary" in prompt
 
+    def test_generate_qa_prompt_wraps_untrusted_data(self):
+        """S-5: transcript/summary text must sit inside explicit data markers."""
+        from video_summarizer.search import generate_qa_prompt
+        from video_summarizer.summarizer.prompts import UNTRUSTED_DATA_BEGIN, UNTRUSTED_DATA_END, UNTRUSTED_DATA_RULE
+
+        transcript = [{"start": 0.0, "end": 5.0, "text": "Hello world"}]
+        summaries = [{"start": 0.0, "end": 5.0, "text": "Summary"}]
+        final_summary = {"one_sentence_summary": "一句话总结"}
+
+        prompt = generate_qa_prompt("What is this about?", transcript, summaries, final_summary)
+
+        assert UNTRUSTED_DATA_BEGIN in prompt
+        assert UNTRUSTED_DATA_END in prompt
+        assert UNTRUSTED_DATA_RULE in prompt
+        # One delimited block per untrusted section: transcript, summaries,
+        # final summary. (The rule sentence itself also names the markers, so
+        # anchor on the newline that starts each delimited block.)
+        assert prompt.count(f"{UNTRUSTED_DATA_BEGIN}\n") == 3
+        assert prompt.count(f"\n{UNTRUSTED_DATA_END}") == 3
+
     def test_parse_qa_response_with_json(self):
         from video_summarizer.search import parse_qa_response
         response = '''

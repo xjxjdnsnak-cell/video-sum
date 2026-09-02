@@ -14,6 +14,8 @@ from .prompts import (
     QUOTE_EXTRACTION_PROMPT,
     CHAPTER_AGGREGATION_PROMPT,
     TERM_EXTRACTION_PROMPT,
+    UNTRUSTED_DATA_RULE,
+    wrap_untrusted_text,
 )
 
 
@@ -319,10 +321,10 @@ class OpenAILLMClient(BaseLLMClient):
         user_prompt = CHUNK_SUMMARY_PROMPT.format(
             start_time=start_time,
             end_time=end_time,
-            text=text
+            text=wrap_untrusted_text(text)
         )
         response = self._call_llm(
-            "你是一个专业的视频内容摘要助手。请严格按照JSON格式输出。",
+            "你是一个专业的视频内容摘要助手。请严格按照JSON格式输出。" + UNTRUSTED_DATA_RULE,
             user_prompt
         )
         
@@ -375,10 +377,10 @@ class OpenAILLMClient(BaseLLMClient):
     def extract_quotes(self, transcript: List[Dict]) -> List[Dict]:
         transcript_text = bounded_transcript_text(transcript)
 
-        user_prompt = QUOTE_EXTRACTION_PROMPT.format(transcript=transcript_text)
+        user_prompt = QUOTE_EXTRACTION_PROMPT.format(transcript=wrap_untrusted_text(transcript_text))
         
         response = self._call_llm(
-            "你是一个专业的视频内容分析师，请严格按照JSON格式输出。",
+            "你是一个专业的视频内容分析师，请严格按照JSON格式输出。" + UNTRUSTED_DATA_RULE,
             user_prompt
         )
         
@@ -476,10 +478,10 @@ class OllamaLLMClient(BaseLLMClient):
         user_prompt = CHUNK_SUMMARY_PROMPT.format(
             start_time=start_time,
             end_time=end_time,
-            text=text
+            text=wrap_untrusted_text(text)
         )
         response = self._call_llm(
-            "你是一个专业的视频内容摘要助手。",
+            "你是一个专业的视频内容摘要助手。" + UNTRUSTED_DATA_RULE,
             user_prompt
         )
         
@@ -531,10 +533,10 @@ class OllamaLLMClient(BaseLLMClient):
     def extract_quotes(self, transcript: List[Dict]) -> List[Dict]:
         transcript_text = bounded_transcript_text(transcript)
 
-        user_prompt = QUOTE_EXTRACTION_PROMPT.format(transcript=transcript_text)
+        user_prompt = QUOTE_EXTRACTION_PROMPT.format(transcript=wrap_untrusted_text(transcript_text))
         
         response = self._call_llm(
-            "你是一个专业的视频内容分析师。",
+            "你是一个专业的视频内容分析师。" + UNTRUSTED_DATA_RULE,
             user_prompt
         )
         

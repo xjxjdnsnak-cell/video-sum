@@ -33,13 +33,6 @@ packages = ["video_summarizer"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 
-[project.metadata]
-tags = [
-    "video-summarizer",
-    "bilibili",
-    "whisper",
-    "llm",
-]
-
-[project.metadata.urls]
-Repository = "https://github.com/xjxjdnsnak-cell/video-sum"
+# Note: the former [project.metadata] / [project.metadata.urls] tables were
+# removed (audit A-7) - they are not valid PEP 621 metadata. The equivalents
+# would be [project.keywords] and [project.urls].

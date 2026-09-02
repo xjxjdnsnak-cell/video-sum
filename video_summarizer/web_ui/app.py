@@ -16,7 +16,7 @@ from video_summarizer.summarizer.pipeline import (
 )
 from video_summarizer.evaluator.evaluate import evaluate_video, generate_markdown_report
 from video_summarizer.media.ffmpeg import check_ffmpeg_installed
-from video_summarizer.media.downloader import check_ytdlp_installed
+from video_summarizer.media.downloader import check_ytdlp_installed, is_bilibili_url
 from video_summarizer.exporters.markdown import export_markdown
 from video_summarizer.exporters.json_exporter import export_json
 from video_summarizer.exporters.srt import export_srt
@@ -224,6 +224,14 @@ def render_new_task_form():
             return
         if input_type == "🔗 B站链接" and not video_url:
             st.error("请先输入B站链接")
+            return
+        # S-4: the Web UI must not hand arbitrary domains (and any cookies the
+        # user configured) to yt-dlp. Non-bilibili URLs are refused outright.
+        if input_type == "🔗 B站链接" and not is_bilibili_url(video_url):
+            st.error(
+                "仅支持B站内容：bilibili.com 链接、b23.tv 短链接或 BV/av 号。"
+                "Web UI 不允许处理其他域名的 URL（CLI 可用 --allow-any-url 显式放行）。"
+            )
             return
         
         with st.spinner("正在处理..."):

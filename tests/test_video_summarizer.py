@@ -30,28 +30,45 @@ class TestConfig:
         assert test_settings.OUTPUT_DIR.exists()
 
 
-class TestModels:
-    def test_video_model(self):
-        from video_summarizer.models import Video
-        video = Video(source_type="local", title="Test Video", id=1)
-        assert video.id == 1
-        assert video.source_type == "local"
-        assert video.title == "Test Video"
+class TestModelsRemoved:
+    """A-7: video_summarizer/models.py was dead code and has been removed."""
 
-    def test_transcript_segment_model(self):
-        from video_summarizer.models import TranscriptSegment
-        seg = TranscriptSegment(video_id=1, start=0.0, end=5.0, text="Hello world")
-        assert seg.video_id == 1
-        assert seg.start == 0.0
-        assert seg.text == "Hello world"
+    def test_models_module_removed(self):
+        import video_summarizer
+        pkg_dir = Path(video_summarizer.__file__).parent
+        assert not (pkg_dir / "models.py").exists()
 
-    def test_summary_chunk_model(self):
-        from video_summarizer.models import SummaryChunk
-        chunk = SummaryChunk(
-            video_id=1, start=0.0, end=180.0,
-            source_text="Original text", summary="Summary"
+    def test_package_imports_cleanly_without_models(self):
+        """Import scan: every module in the package must still import."""
+        import importlib
+        import pkgutil
+        import video_summarizer
+
+        failed = []
+        for mod in pkgutil.walk_packages(video_summarizer.__path__, prefix="video_summarizer."):
+            try:
+                importlib.import_module(mod.name)
+            except Exception as e:  # pragma: no cover - only on failure
+                failed.append((mod.name, repr(e)))
+        assert failed == []
+
+    def test_no_source_references_models_module(self):
+        import video_summarizer
+        pkg_dir = Path(video_summarizer.__file__).parent
+        markers = (
+            "from ..models",
+            "from .models",
+            "from video_summarizer.models",
+            "import video_summarizer.models",
+            "import models",
         )
-        assert chunk.end - chunk.start == 180.0
+        offenders = []
+        for py in pkg_dir.rglob("*.py"):
+            src = py.read_text(encoding="utf-8")
+            for marker in markers:
+                if marker in src:
+                    offenders.append(f"{py.name}: {marker}")
+        assert offenders == []
 
 
 class TestTimefmt:
@@ -497,6 +514,42 @@ class TestDoctorCommand:
         assert "yt-dlp" in source
         assert "LLM Provider" in source
 
+    def test_doctor_probes_each_tool_once(self, monkeypatch):
+        """P-4: ffmpeg/yt-dlp must be probed once per doctor run, not twice."""
+        from video_summarizer import cli
+        from typer.testing import CliRunner
+
+        calls = {"ffmpeg": 0, "ytdlp": 0}
+
+        def fake_ffmpeg():
+            calls["ffmpeg"] += 1
+            return True
+
+        def fake_ytdlp():
+            calls["ytdlp"] += 1
+            return True
+
+        monkeypatch.setattr(cli, "check_ffmpeg_installed", fake_ffmpeg)
+        monkeypatch.setattr(cli, "check_ytdlp_installed", fake_ytdlp)
+        # Isolate the CLI callback and doctor's DB listing from module-level
+        # settings mutations made by other tests in the session; this test
+        # only cares about the probe counts.
+        monkeypatch.setattr(cli, "setup_logging", lambda: "unused.log")
+        monkeypatch.setattr(cli, "init_db", lambda: None)
+        import video_summarizer.db as db_module
+        monkeypatch.setattr(db_module, "get_all_videos", lambda: [])
+
+        # The autouse settings fixture points OUTPUT_DIR at a temp dir but
+        # never creates it; doctor's writability check would report NOT writable.
+        Path(cli.settings.OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
+
+        runner = CliRunner()
+        result = runner.invoke(cli.app, ["doctor"])
+
+        assert result.exit_code == 0, result.output
+        assert calls["ffmpeg"] == 1
+        assert calls["ytdlp"] == 1
+
 
 class TestResumeBehavior:
     def test_mock_asr_twice_does_not_duplicate_transcript(self, tmp_path, monkeypatch):
@@ -724,6 +777,108 @@ class TestBilibiliURL:
         assert not is_bilibili_url("https://example.com/video")
 
 
+class TestAllowAnyUrl:
+    """S-4: non-bilibili URLs require an explicit --allow-any-url opt-in."""
+
+    NON_BILI_URL = "https://example.com/videos/123"
+
+    def _mock_pipeline(self, monkeypatch):
+        """Stub every network-touching callable in the CLI's URL flow."""
+        monkeypatch.setattr("video_summarizer.cli.check_ffmpeg_installed", lambda: True)
+        monkeypatch.setattr("video_summarizer.cli.check_ytdlp_installed", lambda: True)
+
+        info = SimpleNamespace(title="Example Video", author="someone", duration=60.0, requires_login=False)
+        info_calls = []
+
+        def fake_get_url_info(url, **kwargs):
+            info_calls.append(url)
+            return info
+
+        monkeypatch.setattr("video_summarizer.cli.get_url_info", fake_get_url_info)
+        return info_calls
+
+    def test_non_bilibili_url_refused_without_flag(self, monkeypatch):
+        from video_summarizer.db import init_db
+        from typer.testing import CliRunner
+        from video_summarizer.cli import app
+
+        init_db()
+        info_calls = self._mock_pipeline(monkeypatch)
+
+        runner = CliRunner()
+        result = runner.invoke(app, [
+            "summarize-url", self.NON_BILI_URL,
+            "--asr-provider", "mock",
+            "--llm-provider", "mock",
+        ])
+
+        assert result.exit_code != 0
+        assert "allow-any-url" in result.output
+        # Refusal must happen before any yt-dlp call
+        assert info_calls == []
+
+    def test_non_bilibili_url_allowed_with_flag(self, tmp_path, monkeypatch):
+        from video_summarizer.db import init_db
+        from typer.testing import CliRunner
+        from video_summarizer.cli import app
+
+        init_db()
+        info_calls = self._mock_pipeline(monkeypatch)
+
+        srt_content = """1
+00:00:00,000 --> 00:00:05,000
+第一句字幕
+
+2
+00:00:05,000 --> 00:00:10,000
+第二句字幕
+"""
+
+        def fake_download_subtitles(url, output_dir, **kwargs):
+            srt = Path(output_dir) / "example.srt"
+            srt.write_text(srt_content, encoding="utf-8")
+            return srt
+
+        monkeypatch.setattr("video_summarizer.cli.download_subtitles", fake_download_subtitles)
+
+        runner = CliRunner()
+        result = runner.invoke(app, [
+            "summarize-url", self.NON_BILI_URL,
+            "--asr-provider", "mock",
+            "--llm-provider", "mock",
+            "--allow-any-url",
+        ])
+
+        assert result.exit_code == 0, result.output
+        assert info_calls == [self.NON_BILI_URL]
+
+    def test_bilibili_url_does_not_need_flag(self, monkeypatch):
+        """BV号 input (a bilibili identity) must keep working without the flag."""
+        from video_summarizer.db import init_db
+        from typer.testing import CliRunner
+        from video_summarizer.cli import app
+
+        init_db()
+        info_calls = self._mock_pipeline(monkeypatch)
+
+        def fake_download_subtitles(url, output_dir, **kwargs):
+            srt = Path(output_dir) / "BV.srt"
+            srt.write_text("1\n00:00:00,000 --> 00:00:05,000\n字幕\n", encoding="utf-8")
+            return srt
+
+        monkeypatch.setattr("video_summarizer.cli.download_subtitles", fake_download_subtitles)
+
+        runner = CliRunner()
+        result = runner.invoke(app, [
+            "summarize-url", "BV1xx411c7mZ",
+            "--asr-provider", "mock",
+            "--llm-provider", "mock",
+        ])
+
+        assert result.exit_code == 0, result.output
+        assert info_calls == ["BV1xx411c7mZ"]
+
+
 class TestDownloaderErrorHandling:
     def test_http_412_error_message(self):
         from video_summarizer.media.downloader import handle_ytdlp_error, DownloaderError
@@ -900,6 +1055,40 @@ class TestEvaluator:
         result = evaluator.evaluate()
 
         assert len(result.warnings) > 0 or len(result.issues) > 0
+
+    def test_invented_quote_scores_lower_than_real_quotes(self):
+        """A-6: unmatched quotes must reduce the faithfulness score."""
+        from video_summarizer.evaluator.evaluate import Evaluator
+
+        transcript = [
+            {"start": 0.0, "end": 5.0, "text": "这是第一段真实的转写内容"},
+            {"start": 5.0, "end": 10.0, "text": "这是第二段真实的转写内容"},
+        ]
+        chunks = [
+            {"start": 0.0, "end": 5.0, "start_time": "00:00", "end_time": "00:05", "summary": "第一段摘要"},
+            {"start": 5.0, "end": 10.0, "start_time": "00:05", "end_time": "00:10", "summary": "第二段摘要"},
+        ]
+        final_summary = {
+            "one_sentence_summary": "这是关于视频内容的一句话总结",
+            "chapter_toc": ["章节1", "章节2"],
+        }
+        real_quotes = [
+            {"text": "这是第一段真实的转写内容", "start_time": "00:00", "end_time": "00:05"},
+            {"text": "这是第二段真实的转写内容", "start_time": "00:05", "end_time": "00:10"},
+        ]
+        invented_quotes = [
+            {"text": "这是第一段真实的转写内容", "start_time": "00:00", "end_time": "00:05"},
+            {"text": "这句引用在转写中完全不存在而且是从未说过的话XYZQWERTY", "start_time": "00:05", "end_time": "00:10"},
+        ]
+
+        good = Evaluator(transcript, chunks, final_summary, quotes=real_quotes).evaluate()
+        bad = Evaluator(transcript, chunks, final_summary, quotes=invented_quotes).evaluate()
+
+        assert bad.faithfulness_score < good.faithfulness_score
+        assert bad.overall_score < good.overall_score
+        assert good.faithfulness_score == 100.0
+        assert any("not found in transcript" in issue for issue in bad.issues)
+        assert not any("not found in transcript" in issue for issue in good.issues)
 
 
 class TestLLMClientProvider:

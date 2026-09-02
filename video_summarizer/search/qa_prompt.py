@@ -3,6 +3,8 @@ import re
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 
+from ..summarizer.prompts import UNTRUSTED_DATA_RULE, wrap_untrusted_text
+
 
 def generate_qa_prompt(
     question: str,
@@ -21,6 +23,7 @@ def generate_qa_prompt(
     )
     
     prompt = f"""你是一个视频内容问答助手。你的任务是根据提供的转写和摘要内容，回答用户的问题。
+{UNTRUSTED_DATA_RULE}
 
 重要规则：
 1. 你必须基于提供的转写文本和摘要内容来回答问题
@@ -30,19 +33,22 @@ def generate_qa_prompt(
 5. 如果证据不足，可以说明"基于现有转写，只能确认..."而不是猜测
 
 转写内容（按时间顺序，最多50段）：
-{transcript_text}
+{wrap_untrusted_text(transcript_text)}
 
 摘要内容：
-{summary_text}
+{wrap_untrusted_text(summary_text)}
 """
     
     if final_summary:
+        final_summary_text = (
+            f"一句话总结：{final_summary.get('one_sentence_summary', 'N/A')}\n"
+            f"详细总结：{final_summary.get('detailed_summary', 'N/A')}\n"
+            f"关键要点：{final_summary.get('key_points', 'N/A')}\n"
+            f"常见问题：{final_summary.get('questions', 'N/A')}"
+        )
         prompt += f"""
 视频总摘要：
-一句话总结：{final_summary.get('one_sentence_summary', 'N/A')}
-详细总结：{final_summary.get('detailed_summary', 'N/A')}
-关键要点：{final_summary.get('key_points', 'N/A')}
-常见问题：{final_summary.get('questions', 'N/A')}
+{wrap_untrusted_text(final_summary_text)}
 """
 
     prompt += f"""

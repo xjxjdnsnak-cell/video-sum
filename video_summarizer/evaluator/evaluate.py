@@ -194,11 +194,30 @@ class Evaluator:
 
     def _evaluate_faithfulness(self) -> float:
         score = 100.0
-        
-        if self.errors:
-            quote_errors = [e for e in self.errors if "quote" in e.message.lower()]
-            score -= 15 * len(quote_errors)
-        
+
+        # A-6: every quote must be verbatim-findable in the transcript. The
+        # faithfulness score is reduced proportionally to the share of quotes
+        # that cannot be matched, so a summary built on invented quotes cannot
+        # score full marks.
+        if not self.quotes:
+            return score
+
+        matched = 0
+        for i, quote in enumerate(self.quotes):
+            quote_text = quote.get("text", "") if isinstance(quote, dict) else str(quote or "")
+            if quote_text and self.validator.quote_exists_in_transcript(quote_text):
+                matched += 1
+                continue
+            preview = quote_text[:50] + "..." if len(quote_text) > 50 else (quote_text or "<empty quote>")
+            self.errors.append(ValidationError(
+                rule="quote_verification",
+                message=f'Quote {i + 1} not found in transcript: "{preview}"',
+                severity="error"
+            ))
+
+        unmatched = len(self.quotes) - matched
+        score -= 100.0 * (unmatched / len(self.quotes))
+
         return max(0, min(100, score))
 
     def _evaluate_timestamp_accuracy(self) -> float:

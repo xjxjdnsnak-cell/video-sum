@@ -5,7 +5,6 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from ..config import settings
-from ..models import Video, TranscriptSegment, SummaryChunk, FinalSummary
 from ..db import get_db
 from ..utils.timefmt import format_timestamp
 from .chunker import create_chunks_from_segments, merge_short_chunks, TextChunk
