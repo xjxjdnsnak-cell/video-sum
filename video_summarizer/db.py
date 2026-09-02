@@ -148,6 +148,30 @@ def init_db():
                 FOREIGN KEY (video_id) REFERENCES videos(id)
             )
         """)
+        # Indexes on the video_id FK columns: every hot query
+        # (has_transcript_segments, has_summary_chunks, get_video_info's COUNT
+        # subqueries, get_transcript, ...) filters by video_id. Without these
+        # each one is a full table scan once the tables grow.
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_transcript_segments_video
+            ON transcript_segments(video_id, start)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_summary_chunks_video
+            ON summary_chunks(video_id, start)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_video_chapters_video
+            ON video_chapters(video_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_video_quotes_video
+            ON video_quotes(video_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_video_terms_video
+            ON video_terms(video_id)
+        """)
         conn.commit()
 
 
@@ -244,6 +268,33 @@ def has_final_summary(video_id: int) -> bool:
         return cursor.fetchone()[0] > 0
 
 
+def find_video_by_source(conn: sqlite3.Connection, *sources: str) -> Optional[dict]:
+    """Find an existing video record by one of its source identities.
+
+    `sources` are candidate identity strings for the same video, e.g. the raw
+    user input plus its normalized form (absolute local path or normalized
+    URL). The query is parameterized; the oldest matching record (lowest id)
+    wins. Callers pass a connection taken from `get_db()` so the lookup can be
+    combined with other work in the same transaction.
+    """
+    candidates = [s for s in sources if s]
+    if not candidates:
+        return None
+    cursor = conn.cursor()
+    placeholders = ", ".join("?" for _ in candidates)
+    cursor.execute(
+        f"""
+        SELECT * FROM videos
+        WHERE source_path IN ({placeholders}) OR url IN ({placeholders})
+        ORDER BY id
+        LIMIT 1
+        """,
+        candidates + candidates,
+    )
+    row = cursor.fetchone()
+    return dict(row) if row else None
+
+
 def clear_transcript_segments(video_id: int):
     with get_db() as conn:
         cursor = conn.cursor()
@@ -265,6 +316,37 @@ def clear_final_summary(video_id: int):
         conn.commit()
 
 
+def clear_video_quotes(video_id: int):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM video_quotes WHERE video_id = ?", (video_id,))
+        conn.commit()
+
+
+def clear_video_chapters(video_id: int):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM video_chapters WHERE video_id = ?", (video_id,))
+        conn.commit()
+
+
+def clear_video_terms(video_id: int):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM video_terms WHERE video_id = ?", (video_id,))
+        conn.commit()
+
+
+def clear_summary_outputs(video_id: int):
+    """Delete all summary-stage derived rows (chunk summaries, final summary,
+    quotes, chapters, terms) so a forced re-run cannot accumulate duplicates."""
+    clear_summary_chunks(video_id)
+    clear_final_summary(video_id)
+    clear_video_quotes(video_id)
+    clear_video_chapters(video_id)
+    clear_video_terms(video_id)
+
+
 def clear_video_outputs(video_id: int):
     with get_db() as conn:
         cursor = conn.cursor()
@@ -276,6 +358,14 @@ def clear_video_outputs(video_id: int):
             WHERE id = ?
         """, (datetime.now().isoformat(), video_id))
         conn.commit()
+
+
+def clear_video_work_data(video_id: int):
+    """Delete every derived row (transcript + summaries) for a video so a full
+    re-run starts clean. Used by flows that always re-execute all stages."""
+    clear_transcript_segments(video_id)
+    clear_summary_outputs(video_id)
+    clear_video_outputs(video_id)
 
 
 def get_all_videos():

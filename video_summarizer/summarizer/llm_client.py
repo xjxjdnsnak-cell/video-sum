@@ -21,6 +21,39 @@ class LLMError(Exception):
     pass
 
 
+# Hard cap for a single LLM round-trip, in seconds. Without it the OpenAI SDK
+# default (600s) can hang a whole chunk (or the whole pipeline, since chunk
+# summaries now share a small thread pool) on a stalled connection. Timeouts
+# surface as exceptions and keep the existing LLMError error behavior.
+LLM_CALL_TIMEOUT_SECONDS = 120
+
+# extract_quotes stuffs the transcript into a single prompt. Capped to the
+# last ~12000 characters (roughly 4-6k tokens of English, fewer for CJK) so a
+# long video cannot exceed the model context window and fail the whole
+# pipeline. We keep the tail because closing/summary statements - the usual
+# quote material - live near the end, and we only ever drop whole
+# timestamp-prefixed lines from the front, so remaining lines stay intact.
+QUOTE_CONTEXT_MAX_CHARS = 12000
+
+
+def bounded_transcript_text(transcript: List[Dict]) -> str:
+    """Format transcript segments as timestamped lines, keeping only as many
+    trailing lines as fit within QUOTE_CONTEXT_MAX_CHARS."""
+    lines = [
+        f"[{format_timestamp(seg['start'])} - {format_timestamp(seg['end'])}] {seg['text']}"
+        for seg in transcript
+    ]
+    selected: List[str] = []
+    total = 0
+    for line in reversed(lines):
+        cost = len(line) + 1  # +1 for the joining newline
+        if selected and total + cost > QUOTE_CONTEXT_MAX_CHARS:
+            break
+        selected.append(line)
+        total += cost
+    return "\n".join(reversed(selected))
+
+
 class BaseLLMClient(ABC):
     @abstractmethod
     def summarize_chunk(self, text: str, start_time: str, end_time: str) -> Dict:
@@ -263,7 +296,8 @@ class OpenAILLMClient(BaseLLMClient):
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=2000
+                max_tokens=2000,
+                timeout=LLM_CALL_TIMEOUT_SECONDS
             )
             return response.choices[0].message.content
         except Exception as e:
@@ -339,11 +373,8 @@ class OpenAILLMClient(BaseLLMClient):
         }
 
     def extract_quotes(self, transcript: List[Dict]) -> List[Dict]:
-        transcript_text = "\n".join([
-            f"[{format_timestamp(seg['start'])} - {format_timestamp(seg['end'])}] {seg['text']}"
-            for seg in transcript
-        ])
-        
+        transcript_text = bounded_transcript_text(transcript)
+
         user_prompt = QUOTE_EXTRACTION_PROMPT.format(transcript=transcript_text)
         
         response = self._call_llm(
@@ -423,7 +454,8 @@ class OllamaLLMClient(BaseLLMClient):
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                stream=False
+                stream=False,
+                timeout=LLM_CALL_TIMEOUT_SECONDS
             )
             return response.choices[0].message.content
         except Exception as e:
@@ -497,11 +529,8 @@ class OllamaLLMClient(BaseLLMClient):
         }
 
     def extract_quotes(self, transcript: List[Dict]) -> List[Dict]:
-        transcript_text = "\n".join([
-            f"[{format_timestamp(seg['start'])} - {format_timestamp(seg['end'])}] {seg['text']}"
-            for seg in transcript
-        ])
-        
+        transcript_text = bounded_transcript_text(transcript)
+
         user_prompt = QUOTE_EXTRACTION_PROMPT.format(transcript=transcript_text)
         
         response = self._call_llm(

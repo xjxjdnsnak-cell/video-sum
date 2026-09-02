@@ -16,6 +16,7 @@ from .db import (
     update_video_stage, update_video_status, update_video_outputs,
     get_video_info, has_transcript_segments, has_summary_chunks, has_final_summary,
     clear_transcript_segments, clear_summary_chunks, clear_final_summary, clear_video_outputs,
+    find_video_by_source, clear_summary_outputs,
     get_all_videos, create_video_record, update_video_duration
 )
 from .media.ffmpeg import extract_audio, get_video_duration, check_ffmpeg_installed, FFmpegError
@@ -351,6 +352,26 @@ def download_model(
         raise typer.Exit(code=1)
 
 
+def _find_existing_video(*identities: str) -> Optional[dict]:
+    """Look up an existing video record by any of its source identities.
+
+    Reusing the record for the same source is what makes --resume work across
+    runs: stable ids keep has_transcript_segments()/has_summary_chunks()
+    checkpoints meaningful and keep the audio cache key
+    (audio_cache/video_summarizer_{id}.wav) valid.
+    """
+    with get_db() as conn:
+        return find_video_by_source(conn, *identities)
+
+
+def _clear_previous_summary(video_id: int):
+    """Wipe summary-stage rows of an existing record before a --force re-run so
+    the pipeline's INSERTs cannot accumulate duplicate rows."""
+    logger.info(f"Clearing previous summary outputs for video {video_id} (--force)")
+    clear_summary_outputs(video_id)
+    clear_video_outputs(video_id)
+
+
 def _run_summarize(
     video_path_or_url: str,
     is_url: bool,
@@ -399,14 +420,30 @@ def _run_summarize(
                 console.print(f"[red]yt-dlp error: {e}[/red]")
                 raise typer.Exit(code=1)
 
-            video_id = create_video_record(
-                source_type="url",
-                url=video_path_or_url,
-                title=info.title,
-                author=info.author,
-                duration=info.duration
-            )
-            logger.info(f"Created video record {video_id} for URL: {video_path_or_url}")
+            # Identity: normalized URL (BV/av numbers and protocol-relative
+            # links are canonicalized to a full bilibili.com URL). We look up
+            # by both the raw input and the normalized form so records created
+            # before normalization was stored are still found.
+            url_identity = normalize_bilibili_url(video_path_or_url)
+            existing = _find_existing_video(video_path_or_url, url_identity)
+
+            if existing:
+                video_id = existing["id"]
+                logger.info(f"Reusing existing video record {video_id} for URL: {url_identity}")
+                if force and not (download_subtitle_only or download_audio_only):
+                    console.print(f"[yellow]Reusing video record {video_id}; clearing previous results (--force)[/yellow]")
+                    _clear_previous_summary(video_id)
+                else:
+                    console.print(f"[green]Reusing existing video record {video_id}[/green]")
+            else:
+                video_id = create_video_record(
+                    source_type="url",
+                    url=url_identity,
+                    title=info.title,
+                    author=info.author,
+                    duration=info.duration
+                )
+                logger.info(f"Created video record {video_id} for URL: {video_path_or_url}")
 
             if info.requires_login and not cookies and not cookies_from_browser:
                 console.print("[yellow]警告：视频可能需要登录才能访问。建议使用 --cookies 参数。[/yellow]")
@@ -421,12 +458,26 @@ def _run_summarize(
             if use_mock_asr:
                 console.print(f"[yellow]Using Mock ASR (--asr-provider mock)[/yellow]")
 
-            video_id = create_video_record(
-                source_type="local",
-                source_path=str(video_path),
-                title=video_path.stem
-            )
-            logger.info(f"Created video record {video_id} for file: {video_path}")
+            # Identity: absolute resolved path, so the same file passed via a
+            # relative path still matches the record created earlier.
+            path_identity = str(video_path.resolve())
+            existing = _find_existing_video(str(video_path), path_identity)
+
+            if existing:
+                video_id = existing["id"]
+                logger.info(f"Reusing existing video record {video_id} for file: {video_path}")
+                if force:
+                    console.print(f"[yellow]Reusing video record {video_id}; clearing previous results (--force)[/yellow]")
+                    _clear_previous_summary(video_id)
+                else:
+                    console.print(f"[green]Reusing existing video record {video_id}[/green]")
+            else:
+                video_id = create_video_record(
+                    source_type="local",
+                    source_path=path_identity,
+                    title=video_path.stem
+                )
+                logger.info(f"Created video record {video_id} for file: {video_path}")
 
         update_video_status(video_id, "processing", "created")
         logger.info(f"Starting pipeline for video {video_id}")
@@ -436,59 +487,73 @@ def _run_summarize(
         transcript_data = None
 
         if is_url:
-            with tempfile.TemporaryDirectory() as temp_dir:
-                temp_path = Path(temp_dir)
+            # With a stable video id, an existing transcript means the download
+            # stage already completed in a previous run: skip it entirely
+            # instead of re-fetching subtitles/audio (and re-saving rows).
+            if (not force) and resume and has_transcript_segments(video_id):
+                console.print(f"[green]Using existing transcript for video {video_id} (use --force to re-download)[/green]")
+                logger.info(f"Using existing transcript for video {video_id} (URL flow)")
+                transcript_data = get_transcript(video_id)
+            else:
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    temp_path = Path(temp_dir)
 
-                has_subtitles = False
-                if not download_audio_only:
-                    console.print("[cyan]Checking for subtitles...[/cyan]")
-                    srt_path = download_subtitles(
-                        video_path_or_url, temp_path,
-                        cookies_file=cookies,
-                        cookies_from_browser=cookies_from_browser,
-                        proxy=proxy,
-                        user_agent=user_agent
-                    )
-                    if srt_path and srt_path.exists():
-                        console.print(f"[green]✓ 找到字幕: {srt_path}[/green]")
-                        logger.info(f"Found subtitles for video {video_id}")
-                        console.print("[cyan]Parsing subtitles...[/cyan]")
-                        subtitle_segments = parse_srt(str(srt_path))
-                        transcript_data = [
-                            {"start": s.start, "end": s.end, "text": s.text, "source": "subtitle"}
-                            for s in subtitle_segments
-                        ]
-                        save_transcript(video_id, transcript_data)
-                        update_video_stage(video_id, "transcribed")
-                        has_subtitles = True
-                    else:
-                        console.print("[yellow]✗ 未找到字幕，将使用ASR[/yellow]")
-                        logger.info(f"No subtitles found for video {video_id}")
-
-                if not has_subtitles and not download_subtitle_only:
-                    console.print("[cyan]Downloading audio for ASR...[/cyan]")
-                    audio_path = temp_path / "audio.wav"
-                    try:
-                        download_audio(
-                            video_path_or_url, audio_path,
+                    has_subtitles = False
+                    if not download_audio_only:
+                        console.print("[cyan]Checking for subtitles...[/cyan]")
+                        srt_path = download_subtitles(
+                            video_path_or_url, temp_path,
                             cookies_file=cookies,
                             cookies_from_browser=cookies_from_browser,
                             proxy=proxy,
                             user_agent=user_agent
                         )
-                    except DownloaderError as e:
-                        console.print(f"[red]yt-dlp error: {e}[/red]")
-                        update_video_stage(video_id, "transcribed", str(e))
-                        update_video_status(video_id, "failed")
+                        if srt_path and srt_path.exists():
+                            console.print(f"[green]✓ 找到字幕: {srt_path}[/green]")
+                            logger.info(f"Found subtitles for video {video_id}")
+                            console.print("[cyan]Parsing subtitles...[/cyan]")
+                            subtitle_segments = parse_srt(str(srt_path))
+                            transcript_data = [
+                                {"start": s.start, "end": s.end, "text": s.text, "source": "subtitle"}
+                                for s in subtitle_segments
+                            ]
+                            # Reaching here with an existing transcript means
+                            # --force or --no-resume; clear first so the INSERTs
+                            # below don't duplicate the old rows.
+                            if has_transcript_segments(video_id):
+                                logger.info(f"Clearing existing transcript for video {video_id} before re-save")
+                                clear_transcript_segments(video_id)
+                            save_transcript(video_id, transcript_data)
+                            update_video_stage(video_id, "transcribed")
+                            has_subtitles = True
+                        else:
+                            console.print("[yellow]✗ 未找到字幕，将使用ASR[/yellow]")
+                            logger.info(f"No subtitles found for video {video_id}")
+
+                    if not has_subtitles and not download_subtitle_only:
+                        console.print("[cyan]Downloading audio for ASR...[/cyan]")
+                        audio_path = temp_path / "audio.wav"
+                        try:
+                            download_audio(
+                                video_path_or_url, audio_path,
+                                cookies_file=cookies,
+                                cookies_from_browser=cookies_from_browser,
+                                proxy=proxy,
+                                user_agent=user_agent
+                            )
+                        except DownloaderError as e:
+                            console.print(f"[red]yt-dlp error: {e}[/red]")
+                            update_video_stage(video_id, "transcribed", str(e))
+                            update_video_status(video_id, "failed")
+                            raise typer.Exit(code=1)
+
+                        transcript_data = _do_transcribe(
+                            video_id, str(audio_path), use_mock_asr, model, device, language, model_dir, force, resume
+                        )
+
+                    if download_subtitle_only and not has_subtitles:
+                        console.print("[red]错误：未找到字幕且指定了 --download-subtitle-only[/red]")
                         raise typer.Exit(code=1)
-
-                    transcript_data = _do_transcribe(
-                        video_id, str(audio_path), use_mock_asr, model, device, language, model_dir, force, resume
-                    )
-
-                if download_subtitle_only and not has_subtitles:
-                    console.print("[red]错误：未找到字幕且指定了 --download-subtitle-only[/red]")
-                    raise typer.Exit(code=1)
 
         else:
             duration = get_video_duration(video_path_or_url)
@@ -601,9 +666,11 @@ def _do_transcribe(video_id, audio_path, use_mock_asr, model, device, language, 
         logger.info(f"Using existing transcript for video {video_id}")
         return get_transcript(video_id)
 
-    if has_existing and force:
+    # With stable video ids an existing transcript is now possible on re-runs:
+    # --force or --no-resume both mean "redo it", so clear before re-inserting.
+    if has_existing and (force or not resume):
         console.print(f"[yellow]Clearing existing transcript for video {video_id}[/yellow]")
-        logger.info(f"Clearing existing transcript for video {video_id} (--force)")
+        logger.info(f"Clearing existing transcript for video {video_id} (--force/--no-resume)")
         clear_transcript_segments(video_id)
 
     console.print("[cyan]Transcribing audio...[/cyan]")

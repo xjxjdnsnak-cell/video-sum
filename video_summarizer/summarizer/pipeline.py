@@ -1,4 +1,6 @@
 from typing import List, Optional, Dict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
@@ -12,6 +14,11 @@ from .prompts import NoteStyle
 
 
 console = Console()
+
+# Chunk summaries are independent LLM calls, so they run concurrently. 4
+# workers is a good trade-off for provider rate limits (B站-style 429/412
+# bursts); more workers rarely help and risk throttling.
+MAX_CHUNK_SUMMARY_WORKERS = 4
 
 
 class PipelineError(Exception):
@@ -59,7 +66,21 @@ def get_summary_chunks(video_id: int) -> List[Dict]:
             WHERE video_id = ? ORDER BY start
         """, (video_id,))
         rows = cursor.fetchall()
-        return [{"start": r["start"], "end": r["end"], "source_text": r["source_text"], "summary": r["summary"]} for r in rows]
+        return [
+            {
+                "start": r["start"],
+                "end": r["end"],
+                # Timestamp strings mirror the shape produced by the summarize
+                # path (TextChunk.start_time_str) so consumers like export_json
+                # work identically whether chunks were just generated or loaded
+                # from a previous run's checkpoint.
+                "start_time": format_timestamp(r["start"]),
+                "end_time": format_timestamp(r["end"]),
+                "source_text": r["source_text"],
+                "summary": r["summary"]
+            }
+            for r in rows
+        ]
 
 
 def save_final_summary(video_id: int, summary: Dict, note_style: NoteStyle = NoteStyle.DETAILED) -> int:
@@ -223,6 +244,30 @@ def update_video_status(video_id: int, status: str):
         conn.commit()
 
 
+def _summarize_single_chunk(llm_client: BaseLLMClient, chunk: TextChunk) -> Dict:
+    """Summarize one chunk and shape it into the dict persisted by
+    save_summary_chunks. Runs inside a worker thread; llm_client calls are
+    thread-safe IO."""
+    summary = llm_client.summarize_chunk(
+        text=chunk.text,
+        start_time=chunk.start_time_str,
+        end_time=chunk.end_time_str
+    )
+    return {
+        "start": chunk.start,
+        "end": chunk.end,
+        "start_time": chunk.start_time_str,
+        "end_time": chunk.end_time_str,
+        "source_text": chunk.text[:500],
+        "topic": summary.get("topic", ""),
+        "key_points": summary.get("key_points", []),
+        "important_terms": summary.get("important_terms", []),
+        "quote": summary.get("quote", ""),
+        "chapter_hint": summary.get("chapter_hint", ""),
+        "summary": summary.get("summary", "")
+    }
+
+
 def summarize_video_pipeline(
     video_id: int,
     llm_provider: Optional[str] = None,
@@ -257,33 +302,27 @@ def summarize_video_pipeline(
         console.print(f"[dim]Created {len(chunks)} chunks[/dim]")
 
         console.print("[cyan]Generating chunk summaries...[/cyan]")
-        chunk_summaries = []
+        # Chunk summaries are independent: fan them out to a small thread pool.
+        # Results are stored by chunk index so persistence order always follows
+        # chunk order; progress advances in the main thread as futures complete
+        # (rich Progress only ever touched from this thread).
+        chunk_summaries: List = [None] * len(chunks)
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
             console=console
         ) as progress:
             task = progress.add_task("Summarizing chunks...", total=len(chunks))
-            for chunk in chunks:
-                summary = llm_client.summarize_chunk(
-                    text=chunk.text,
-                    start_time=chunk.start_time_str,
-                    end_time=chunk.end_time_str
-                )
-                chunk_summaries.append({
-                    "start": chunk.start,
-                    "end": chunk.end,
-                    "start_time": chunk.start_time_str,
-                    "end_time": chunk.end_time_str,
-                    "source_text": chunk.text[:500],
-                    "topic": summary.get("topic", ""),
-                    "key_points": summary.get("key_points", []),
-                    "important_terms": summary.get("important_terms", []),
-                    "quote": summary.get("quote", ""),
-                    "chapter_hint": summary.get("chapter_hint", ""),
-                    "summary": summary.get("summary", "")
-                })
-                progress.update(task, advance=1)
+            max_workers = min(MAX_CHUNK_SUMMARY_WORKERS, len(chunks)) or 1
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_index = {
+                    executor.submit(_summarize_single_chunk, llm_client, chunk): index
+                    for index, chunk in enumerate(chunks)
+                }
+                for future in as_completed(future_to_index):
+                    index = future_to_index[future]
+                    chunk_summaries[index] = future.result()
+                    progress.update(task, advance=1)
 
         save_summary_chunks(video_id, chunk_summaries)
 

@@ -1,7 +1,10 @@
 import pytest
 import tempfile
+import threading
+import time
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 import sys
@@ -1020,3 +1023,347 @@ class TestWebUIImportsFromDB:
         with open(app_path, "r") as f:
             content = f.read()
         assert "from video_summarizer.db import" in content
+
+
+class TestFindVideoBySource:
+    def test_finds_record_by_source_path_or_url(self, setup_env):
+        from video_summarizer.db import init_db, create_video_record, get_db, find_video_by_source
+
+        init_db()
+        local_id = create_video_record(source_type="local", source_path="C:/videos/a.mp4", title="A")
+        url_id = create_video_record(source_type="url", url="https://www.bilibili.com/video/BV1xx", title="B")
+
+        with get_db() as conn:
+            assert find_video_by_source(conn, "C:/videos/a.mp4")["id"] == local_id
+            assert find_video_by_source(conn, "https://www.bilibili.com/video/BV1xx")["id"] == url_id
+            assert find_video_by_source(conn, "https://www.bilibili.com/video/BV1xx", "BV1xx")["id"] == url_id
+            assert find_video_by_source(conn, "does-not-exist.mp4") is None
+            assert find_video_by_source(conn) is None
+
+    def test_uses_parameterized_query(self, setup_env):
+        from video_summarizer.db import init_db, create_video_record, get_db, find_video_by_source
+
+        init_db()
+        create_video_record(source_type="local", source_path="safe.mp4", title="A")
+
+        with get_db() as conn:
+            # SQL metacharacters must be treated as literal data
+            assert find_video_by_source(conn, "x' OR '1'='1") is None
+            assert find_video_by_source(conn, "safe.mp4")["source_path"] == "safe.mp4"
+
+
+class TestFkIndexes:
+    def test_init_db_creates_video_id_indexes(self, setup_env):
+        from video_summarizer.db import init_db, get_db
+
+        init_db()
+        with get_db() as conn:
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'"
+            ).fetchall()
+            names = {r["name"] for r in rows}
+
+        assert "idx_transcript_segments_video" in names
+        assert "idx_summary_chunks_video" in names
+        assert "idx_video_chapters_video" in names
+        assert "idx_video_quotes_video" in names
+        assert "idx_video_terms_video" in names
+
+
+class TestCrossRunResume:
+    """A-1: summarize must reuse the video record of the same source so the
+    has_* checkpoints and the audio cache key stay valid across runs."""
+
+    FAKE_SEGMENTS = [
+        SimpleNamespace(start=0.0, end=5.0, text="第一段内容"),
+        SimpleNamespace(start=5.0, end=10.0, text="第二段内容"),
+    ]
+
+    def _invoke_summarize_local(self, runner, monkeypatch, video_file, force=False):
+        monkeypatch.setattr("video_summarizer.cli.check_ffmpeg_installed", lambda: True)
+        monkeypatch.setattr("video_summarizer.cli.check_ytdlp_installed", lambda: True)
+        monkeypatch.setattr("video_summarizer.cli.get_video_duration", lambda path: 60.0)
+        monkeypatch.setattr(
+            "video_summarizer.cli.extract_audio",
+            lambda video, out: Path(out).touch()
+        )
+        engine_mock = MagicMock()
+        engine_mock.return_value.transcribe.return_value = list(self.FAKE_SEGMENTS)
+        monkeypatch.setattr("video_summarizer.cli.FasterWhisperEngine", engine_mock)
+
+        from video_summarizer.cli import app
+
+        args = [
+            "summarize-local", str(video_file),
+            "--asr-provider", "mock",
+            "--llm-provider", "mock",
+        ]
+        if force:
+            args.append("--force")
+
+        result = runner.invoke(app, args)
+        return result, engine_mock
+
+    def _table_count(self, table):
+        from video_summarizer.db import get_db
+        with get_db() as conn:
+            return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+    def test_running_twice_reuses_record_and_skips_transcription(self, tmp_path, monkeypatch):
+        from video_summarizer.db import init_db
+        from typer.testing import CliRunner
+
+        init_db()
+        video_file = tmp_path / "resume_video.mp4"
+        video_file.write_bytes(b"fake video bytes")
+
+        runner = CliRunner()
+        result1, engine_mock = self._invoke_summarize_local(runner, monkeypatch, video_file)
+        assert result1.exit_code == 0, result1.output
+
+        assert self._table_count("videos") == 1
+        assert self._table_count("transcript_segments") == 2
+        assert self._table_count("summary_chunks") == 1
+        assert engine_mock.return_value.transcribe.call_count == 1
+
+        # Second run on the same source: record must be reused (no new row),
+        # transcript must come from the has_* checkpoint (no re-transcription),
+        # and the summary stage must reuse the persisted chunks.
+        result2, engine_mock2 = self._invoke_summarize_local(runner, monkeypatch, video_file)
+        assert result2.exit_code == 0, result2.output
+
+        assert self._table_count("videos") == 1
+        assert self._table_count("transcript_segments") == 2
+        assert self._table_count("summary_chunks") == 1
+        assert self._table_count("video_quotes") == 2
+        # The fresh engine mock is never touched: transcription was skipped
+        assert engine_mock2.return_value.transcribe.call_count == 0
+
+    def test_force_reuses_id_and_does_not_duplicate_rows(self, tmp_path, monkeypatch):
+        from video_summarizer.db import init_db
+        from typer.testing import CliRunner
+
+        init_db()
+        video_file = tmp_path / "force_video.mp4"
+        video_file.write_bytes(b"fake video bytes")
+
+        runner = CliRunner()
+        result1, engine_mock = self._invoke_summarize_local(runner, monkeypatch, video_file)
+        assert result1.exit_code == 0, result1.output
+        assert self._table_count("videos") == 1
+
+        result2, engine_mock2 = self._invoke_summarize_local(runner, monkeypatch, video_file, force=True)
+        assert result2.exit_code == 0, result2.output
+
+        # Same record reused, everything re-derived exactly once, no duplicates
+        assert self._table_count("videos") == 1
+        assert self._table_count("transcript_segments") == 2
+        assert self._table_count("summary_chunks") == 1
+        assert self._table_count("video_quotes") == 2
+        assert self._table_count("video_chapters") == 1
+        assert self._table_count("final_summaries") == 1
+        # --force re-transcribed: the second run's engine mock was used once
+        assert engine_mock2.return_value.transcribe.call_count == 1
+
+    SRT_CONTENT = """1
+00:00:00,000 --> 00:00:05,000
+第一句字幕
+
+2
+00:00:05,000 --> 00:00:10,000
+第二句字幕
+"""
+
+    def test_url_resume_skips_subtitle_download(self, tmp_path, monkeypatch):
+        from video_summarizer.db import init_db
+        from typer.testing import CliRunner
+
+        init_db()
+
+        monkeypatch.setattr("video_summarizer.cli.check_ffmpeg_installed", lambda: True)
+        monkeypatch.setattr("video_summarizer.cli.check_ytdlp_installed", lambda: True)
+
+        info = SimpleNamespace(title="URL Video", author="UP主", duration=60.0, requires_login=False)
+        monkeypatch.setattr("video_summarizer.cli.get_url_info", lambda *a, **kw: info)
+
+        subtitle_calls = []
+
+        def fake_download_subtitles(url, output_dir, **kwargs):
+            subtitle_calls.append(url)
+            srt = Path(output_dir) / "BV1xx411c7mZ.zh-Hans.srt"
+            srt.write_text(self.SRT_CONTENT)
+            return srt
+
+        monkeypatch.setattr("video_summarizer.cli.download_subtitles", fake_download_subtitles)
+
+        from video_summarizer.cli import app
+
+        args = [
+            "summarize-url", "BV1xx411c7mZ",
+            "--asr-provider", "mock",
+            "--llm-provider", "mock",
+        ]
+
+        runner = CliRunner()
+        result1 = runner.invoke(app, args)
+        assert result1.exit_code == 0, result1.output
+
+        assert self._table_count("videos") == 1
+        assert self._table_count("transcript_segments") == 2
+        assert self._table_count("summary_chunks") == 1
+        assert len(subtitle_calls) == 1
+
+        # Second run: record reused, subtitle download phase skipped entirely,
+        # no duplicated rows
+        result2 = runner.invoke(app, args)
+        assert result2.exit_code == 0, result2.output
+
+        assert self._table_count("videos") == 1
+        assert self._table_count("transcript_segments") == 2
+        assert self._table_count("summary_chunks") == 1
+        assert len(subtitle_calls) == 1
+
+
+class SleepingLLMClient:
+    """MockLLMClient whose summarize_chunk sleeps and records call order."""
+
+    def __init__(self):
+        from video_summarizer.summarizer.llm_client import MockLLMClient
+        self._mock = MockLLMClient()
+        self.calls = []
+        self._lock = threading.Lock()
+
+    def summarize_chunk(self, text, start_time, end_time):
+        with self._lock:
+            self.calls.append((start_time, end_time))
+        time.sleep(0.05)
+        return self._mock.summarize_chunk(text, start_time, end_time)
+
+    def __getattr__(self, name):
+        return getattr(self._mock, name)
+
+
+class TestChunkSummaryConcurrency:
+    def test_all_chunk_summaries_persist_in_chunk_order(self, setup_env):
+        from video_summarizer.db import init_db, create_video_record
+        from video_summarizer.summarizer import pipeline as pipeline_module
+        from video_summarizer.summarizer.pipeline import save_transcript, get_summary_chunks, get_final_summary
+
+        init_db()
+        video_id = create_video_record(source_type="local", title="Concurrency Test")
+
+        # 8 x 30s segments with chunk_min=chunk_max=1min -> 4 chunks of 60s
+        segments = [
+            {"start": i * 30.0, "end": (i + 1) * 30.0, "text": f"segment {i} content", "source": "mock"}
+            for i in range(8)
+        ]
+        save_transcript(video_id, segments)
+
+        client = SleepingLLMClient()
+        with patch.object(pipeline_module, "get_llm_client", return_value=client):
+            result = pipeline_module.summarize_video_pipeline(
+                video_id, llm_provider="mock", chunk_min=1, chunk_max=1
+            )
+
+        assert len(client.calls) == 4
+
+        chunks = get_summary_chunks(video_id)
+        assert len(chunks) == 4
+        # Persistence order must follow chunk order
+        assert [c["start"] for c in chunks] == [0.0, 60.0, 120.0, 180.0]
+        # Each persisted summary must belong to its own chunk (not swapped)
+        for chunk in chunks:
+            assert chunk["start_time"] in chunk["summary"]
+        assert [c["start"] for c in result["chunks"]] == [0.0, 60.0, 120.0, 180.0]
+
+        # The rest of the pipeline still completed on top of the chunks
+        assert get_final_summary(video_id) is not None
+
+
+class TestSingleCallSubtitles:
+    def _fake_run(self, calls, tmp_path, video_id="BV1xx411c7mZ", files=("zh-Hans", "zh-Hant", "en"),
+                  get_id_ok=True, main_ok=True):
+        def fake_run(cmd, capture_output=None, text=None):
+            calls.append(list(cmd))
+            if "--get-id" in cmd:
+                rc = 0 if get_id_ok else 1
+                return SimpleNamespace(returncode=rc, stdout=f"{video_id}\n" if rc == 0 else "", stderr="")
+            if main_ok:
+                for lang in files:
+                    (tmp_path / f"{video_id}.{lang}.srt").write_text("subtitle data")
+            return SimpleNamespace(returncode=0 if main_ok else 1, stdout="", stderr="yt-dlp boom")
+        return fake_run
+
+    def test_single_invocation_prefers_configured_language(self, tmp_path, monkeypatch):
+        from video_summarizer.media import downloader
+
+        calls = []
+        monkeypatch.setattr(downloader.subprocess, "run", self._fake_run(calls, tmp_path))
+
+        result = downloader.download_subtitles("https://www.bilibili.com/video/BV1xx411c7mZ", tmp_path)
+
+        # Best file = first configured language that was produced
+        assert result == tmp_path / "BV1xx411c7mZ.zh-Hans.srt"
+        # Exactly 2 subprocess calls: --get-id probe + ONE subtitle fetch
+        # (the old loop made 1 + len(languages) calls)
+        assert len(calls) == 2
+        sub_cmd = calls[-1]
+        assert "--write-subs" in sub_cmd
+        assert "--write-auto-subs" in sub_cmd
+        assert "--skip-download" in sub_cmd
+        assert "--sub-langs" in sub_cmd
+        assert sub_cmd[sub_cmd.index("--sub-langs") + 1] == "zh-Hans,zh-Hant,zh,en,zh-CN"
+        assert "--convert-subs" in sub_cmd and "srt" in sub_cmd
+
+    def test_language_fallback_order(self, tmp_path, monkeypatch):
+        from video_summarizer.media import downloader
+
+        calls = []
+        # Only English subs available -> returned even though zh is preferred
+        monkeypatch.setattr(
+            downloader.subprocess, "run",
+            self._fake_run(calls, tmp_path, files=("en",))
+        )
+
+        result = downloader.download_subtitles("BV1xx411c7mZ", tmp_path)
+        assert result == tmp_path / "BV1xx411c7mZ.en.srt"
+
+    def test_returns_none_when_no_subtitles_produced(self, tmp_path, monkeypatch):
+        from video_summarizer.media import downloader
+
+        calls = []
+        monkeypatch.setattr(
+            downloader.subprocess, "run",
+            self._fake_run(calls, tmp_path, files=())
+        )
+
+        result = downloader.download_subtitles("BV1xx411c7mZ", tmp_path)
+        assert result is None
+
+    def test_returns_none_when_ytdlp_fails(self, tmp_path, monkeypatch):
+        from video_summarizer.media import downloader
+
+        calls = []
+        monkeypatch.setattr(
+            downloader.subprocess, "run",
+            self._fake_run(calls, tmp_path, main_ok=False)
+        )
+
+        result = downloader.download_subtitles("BV1xx411c7mZ", tmp_path)
+        assert result is None
+        # One probe + one fetch attempt, no per-language retry storm
+        assert len(calls) == 2
+
+    def test_get_id_failure_still_fetches_with_default_template(self, tmp_path, monkeypatch):
+        from video_summarizer.media import downloader
+
+        calls = []
+        monkeypatch.setattr(
+            downloader.subprocess, "run",
+            self._fake_run(calls, tmp_path, get_id_ok=False, files=("zh-Hans",))
+        )
+
+        result = downloader.download_subtitles("BV1xx411c7mZ", tmp_path)
+        assert result == tmp_path / "BV1xx411c7mZ.zh-Hans.srt"
+        assert len(calls) == 2
+        assert any("%(id)s.%(ext)s" in arg for arg in calls[-1])

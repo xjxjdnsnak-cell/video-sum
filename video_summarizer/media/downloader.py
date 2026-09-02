@@ -205,6 +205,29 @@ def handle_ytdlp_error(error_msg: str):
     raise DownloaderError(f"获取视频信息失败: {error_msg}")
 
 
+def _pick_subtitle_file(
+    output_dir: Path,
+    languages: List[str]
+) -> Optional[Path]:
+    """Pick the best subtitle file yt-dlp produced, preferring the configured
+    language order. yt-dlp names subtitle files "<id>.<lang>.srt" (the lang may
+    carry a suffix like "-orig"); files for unlisted languages lose to any
+    configured one and are ordered by name among themselves."""
+    srt_files = sorted(output_dir.glob("*.srt"))
+    if not srt_files:
+        return None
+
+    def lang_priority(path: Path):
+        parts = path.stem.split(".")  # stem strips ".srt"
+        file_lang = parts[-1] if len(parts) > 1 else ""
+        for priority, lang in enumerate(languages):
+            if file_lang == lang or file_lang.startswith(f"{lang}-") or file_lang.startswith(f"{lang}."):
+                return (priority, path.name)
+        return (len(languages), path.name)
+
+    return min(srt_files, key=lang_priority)
+
+
 def download_subtitles(
     url: str,
     output_dir: Path,
@@ -228,31 +251,37 @@ def download_subtitles(
     if result.returncode == 0:
         video_id = result.stdout.strip().split('\n')[0]
 
-    for lang in languages:
-        cmd = [
-            "yt-dlp",
-            "--write-subs",
-            "--sub-langs", lang,
-            "--skip-download",
-            "--convert-subs", "srt",
-        ]
+    # Single yt-dlp call for every configured language. The old per-language
+    # loop re-fetched the page once per language (up to 5 subprocess calls,
+    # each a multi-second network round-trip), which both wasted time and
+    # raised the odds of B站's HTTP 412 rate limiting. One call with a joined
+    # --sub-langs list fetches all available languages at once; we then pick
+    # the best file by configured language order. If no subtitle file is
+    # produced (none available, or yt-dlp failed) we return None, matching the
+    # previous behavior of falling through the loop and returning None.
+    cmd = [
+        "yt-dlp",
+        "--write-subs",
+        "--write-auto-subs",
+        "--sub-langs", ",".join(languages),
+        "--skip-download",
+        "--convert-subs", "srt",
+    ]
 
-        if video_id:
-            output_template = str(output_dir / f"{video_id}.%(ext)s")
-            cmd.extend(["-o", output_template])
-        else:
-            cmd.extend(["-o", str(output_dir / "%(id)s.%(ext)s")])
+    if video_id:
+        output_template = str(output_dir / f"{video_id}.%(ext)s")
+        cmd.extend(["-o", output_template])
+    else:
+        cmd.extend(["-o", str(output_dir / "%(id)s.%(ext)s")])
 
-        cmd.extend(build_ytdlp_args(normalized_url, cookies_file, cookies_from_browser, proxy, user_agent))
-        cmd.append(normalized_url)
+    cmd.extend(build_ytdlp_args(normalized_url, cookies_file, cookies_from_browser, proxy, user_agent))
+    cmd.append(normalized_url)
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode == 0:
-            srt_files = list(output_dir.glob("*.srt"))
-            if srt_files:
-                return srt_files[0]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
 
-    return None
+    return _pick_subtitle_file(output_dir, languages)
 
 
 def download_audio(

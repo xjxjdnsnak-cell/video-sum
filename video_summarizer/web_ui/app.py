@@ -309,7 +309,10 @@ def process_local_video(
     chunk_max: int,
     keep_audio: bool
 ) -> int:
-    from video_summarizer.db import create_video_record, update_video_duration, update_video_status, update_video_stage
+    from video_summarizer.db import (
+        create_video_record, update_video_duration, update_video_status, update_video_stage,
+        find_video_by_source, get_db, clear_video_work_data
+    )
     from video_summarizer.media.ffmpeg import extract_audio, get_video_duration, FFmpegError
     from video_summarizer.asr.faster_whisper_engine import FasterWhisperEngine, FasterWhisperError
     from video_summarizer.summarizer.pipeline import save_transcript, summarize_video_pipeline
@@ -318,15 +321,24 @@ def process_local_video(
     from video_summarizer.exporters.srt import export_srt
     from video_summarizer.summarizer.prompts import NoteStyle as NS
     import tempfile
-    
+
     video_path = Path(video_path)
     video_title = video_path.stem
-    
-    video_id = create_video_record(
-        source_type="local",
-        source_path=str(video_path),
-        title=video_title
-    )
+
+    # Reuse the record for the same source so video ids stay stable; the web UI
+    # always re-runs every stage, so clear the derived data to avoid duplicates.
+    with get_db() as conn:
+        existing = find_video_by_source(conn, str(video_path))
+
+    if existing:
+        video_id = existing["id"]
+        clear_video_work_data(video_id)
+    else:
+        video_id = create_video_record(
+            source_type="local",
+            source_path=str(video_path),
+            title=video_title
+        )
     
     update_video_status(video_id, "processing", "created")
     
@@ -412,19 +424,32 @@ def process_bilibili_url(
     chunk_min: int = 3,
     chunk_max: int = 5
 ) -> int:
-    from video_summarizer.db import create_video_record, update_video_status, update_video_stage
-    from video_summarizer.media.downloader import download_audio, download_subtitles, get_video_info, DownloaderError
+    from video_summarizer.db import (
+        create_video_record, update_video_status, update_video_stage,
+        find_video_by_source, get_db, clear_video_work_data
+    )
+    from video_summarizer.media.downloader import download_audio, download_subtitles, get_video_info, DownloaderError, normalize_bilibili_url
     from video_summarizer.asr.subtitle_parser import parse_srt
     from video_summarizer.summarizer.pipeline import save_transcript, summarize_video_pipeline
     from video_summarizer.summarizer.prompts import NoteStyle as NS
     from video_summarizer.exporters.markdown import export_markdown
     import tempfile
-    
-    video_id = create_video_record(
-        source_type="url",
-        url=url,
-        title=f"B站视频 {url}"
-    )
+
+    # Reuse the record for the same URL so video ids stay stable; the web UI
+    # always re-runs every stage, so clear the derived data to avoid duplicates.
+    url_identity = normalize_bilibili_url(url)
+    with get_db() as conn:
+        existing = find_video_by_source(conn, url, url_identity)
+
+    if existing:
+        video_id = existing["id"]
+        clear_video_work_data(video_id)
+    else:
+        video_id = create_video_record(
+            source_type="url",
+            url=url_identity,
+            title=f"B站视频 {url}"
+        )
     
     update_video_status(video_id, "processing", "created")
     
