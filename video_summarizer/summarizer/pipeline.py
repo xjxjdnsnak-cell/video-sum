@@ -281,7 +281,10 @@ def summarize_video_pipeline(
     try:
         segments = get_transcript(video_id)
         if not segments:
-            raise PipelineError("No transcript found for this video")
+            raise PipelineError(
+                "没有检测到可转写的语音内容（音频可能为纯音乐/纯配乐/静音）。"
+                "如果这是预期情况，请换用包含讲解语音的视频。"
+            )
 
         with get_db() as conn:
             cursor = conn.cursor()
