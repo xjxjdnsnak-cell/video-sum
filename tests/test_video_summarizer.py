@@ -1586,3 +1586,34 @@ class TestDownloadAudio:
         assert cmd[-1] == "https://www.bilibili.com/video/BV1xx411c7mZ"
         assert "-x" in cmd
         assert "--audio-format" in cmd
+
+
+class TestWhisperEngineRealPath:
+    def test_first_call_unpacks_segments_info(self, tmp_path, monkeypatch):
+        """Regression: with _model=None the raw (generator, info) tuple used to
+        leak out of transcribe() -> AttributeError: 'generator' object has no
+        attribute 'start'."""
+        from types import SimpleNamespace
+        from video_summarizer.asr import faster_whisper_engine as engine_mod
+
+        class FakeWhisperModel:
+            def transcribe(self, audio_path, **kwargs):
+                def gen():
+                    yield SimpleNamespace(start=0.0, end=5.0, text="hello")
+                info = SimpleNamespace(language="en", language_probability=0.99)
+                return gen(), info
+
+        audio = tmp_path / "a.wav"
+        audio.write_bytes(b"fake")
+
+        def fake_model(self):
+            self._model = FakeWhisperModel()
+            return self._model
+
+        monkeypatch.setattr(engine_mod.FasterWhisperEngine, "model", property(fake_model))
+
+        engine = engine_mod.FasterWhisperEngine(use_mock=False, model_name="base", device="cpu", compute_type="int8")
+        segments = engine.transcribe(str(audio), language="en")
+
+        assert isinstance(segments, list) and len(segments) == 1
+        assert segments[0].text == "hello"

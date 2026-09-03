@@ -104,9 +104,16 @@ class FasterWhisperEngine:
 
         language = language or self.language or settings.SRT_LANGUAGE
 
-        if self.use_mock or self._model is None:
-            engine = self.model
-            return engine.transcribe(audio_path, language=language)
+        if self.use_mock:
+            return self.model.transcribe(audio_path, language=language)
+
+        # Real ASR path: load the model lazily if needed, then use the
+        # unpacked (segments, info) handling below. The old `or self._model
+        # is None` branch returned the raw WhisperModel.transcribe() tuple
+        # (generator, info) on the first call -> "'generator' object has no
+        # attribute 'start'".
+        if self._model is None:
+            _ = self.model
 
         try:
             segments, info = self._model.transcribe(
