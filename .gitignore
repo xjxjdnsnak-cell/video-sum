@@ -56,3 +56,6 @@ video_summarizer_output/
 # OS
 .DS_Store
 Thumbs.db
+
+# api keys / local config - never commit
+.env

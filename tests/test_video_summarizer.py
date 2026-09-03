@@ -14,11 +14,16 @@ from video_summarizer.summarizer.prompts import NoteStyle
 
 
 class TestConfig:
-    def test_settings_defaults(self):
-        from video_summarizer.config import settings
-        assert settings.LLM_PROVIDER == "mock"
-        assert settings.CHUNK_DURATION_MIN == 3
-        assert settings.CHUNK_DURATION_MAX == 5
+    def test_settings_defaults(self, monkeypatch):
+        from video_summarizer.config import Settings
+        # Isolated settings: dev machines may have a real .env/monkeypatched env
+        for key in list(os.environ):
+            if key.startswith("VIDEO_SUMMARIZER_"):
+                monkeypatch.delenv(key, raising=False)
+        test_settings = Settings(_env_file=None)
+        assert test_settings.LLM_PROVIDER == "mock"
+        assert test_settings.CHUNK_DURATION_MIN == 3
+        assert test_settings.CHUNK_DURATION_MAX == 5
 
     def test_settings_ensure_directories(self, tmp_path):
         from video_summarizer.config import Settings

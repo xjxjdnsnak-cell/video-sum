@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.scripts]
-video-summarizer = "video_summarizer.cli:main"
+video-summarizer = "video_summarizer.cli:app"
 
 [build-system]
 requires = ["hatchling"]
