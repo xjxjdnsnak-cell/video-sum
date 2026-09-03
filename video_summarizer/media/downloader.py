@@ -7,6 +7,8 @@ from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
 from rich.console import Console
 
+from ..config import settings
+
 console = Console()
 
 
@@ -75,6 +77,11 @@ def build_ytdlp_args(
     extra_args: List[str] = None
 ) -> List[str]:
     args = ["--no-warnings"]
+
+    # Fall back to the globally configured cookie file (DOWNLOAD_COOKIES in
+    # .env) so both the CLI and the Web UI pick it up automatically.
+    if not cookies_file and not cookies_from_browser:
+        cookies_file = settings.DOWNLOAD_COOKIES or None
 
     if user_agent:
         args.extend(["--user-agent", user_agent])

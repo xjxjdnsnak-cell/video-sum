@@ -1617,3 +1617,26 @@ class TestWhisperEngineRealPath:
 
         assert isinstance(segments, list) and len(segments) == 1
         assert segments[0].text == "hello"
+
+
+class TestDownloadCookiesConfig:
+    def test_build_args_falls_back_to_settings_cookie(self, tmp_path, monkeypatch):
+        from video_summarizer.media import downloader
+
+        ck = tmp_path / "ck.txt"
+        ck.write_text("# Netscape HTTP Cookie File\n")
+
+        monkeypatch.setattr(downloader.settings, "DOWNLOAD_COOKIES", str(ck))
+        args = downloader.build_ytdlp_args("https://www.bilibili.com/video/BV1xx411c7mZ")
+        assert str(ck) in args
+        assert "--cookies" in args
+
+    def test_explicit_cookie_wins_over_settings(self, tmp_path, monkeypatch):
+        from video_summarizer.media import downloader
+
+        ck = tmp_path / "ck.txt"
+        ck.write_text("# Netscape HTTP Cookie File\n")
+        monkeypatch.setattr(downloader.settings, "DOWNLOAD_COOKIES", str(tmp_path / "nonexistent"))
+
+        args = downloader.build_ytdlp_args("https://x.test/", cookies_file=str(ck))
+        assert str(ck) in args

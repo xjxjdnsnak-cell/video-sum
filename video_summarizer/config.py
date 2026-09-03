@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     OPENAI_MODEL: str = "gpt-3.5-turbo"
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "llama2"
+    DOWNLOAD_COOKIES: str = ""
     CHUNK_DURATION_MIN: int = 3
     CHUNK_DURATION_MAX: int = 5
     SRT_LANGUAGE: str = "zh"
