@@ -59,3 +59,4 @@ Thumbs.db
 
 # api keys / local config - never commit
 .env
+test.mp4
