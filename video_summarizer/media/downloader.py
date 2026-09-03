@@ -305,6 +305,7 @@ def download_audio(
         "--audio-quality", "0",
         "-o", str(output_path),
     ] + build_ytdlp_args(normalized_url, cookies_file, cookies_from_browser, proxy, user_agent)
+    cmd.append(normalized_url)
 
     console.print(f"[dim]正在下载音频: {normalized_url}[/dim]")
     result = subprocess.run(cmd, capture_output=True, text=True)

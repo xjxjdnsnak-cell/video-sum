@@ -1561,3 +1561,28 @@ class TestSingleCallSubtitles:
         assert result == tmp_path / "BV1xx411c7mZ.zh-Hans.srt"
         assert len(calls) == 2
         assert any("%(id)s.%(ext)s" in arg for arg in calls[-1])
+
+
+class TestDownloadAudio:
+    def test_cmd_ends_with_normalized_url(self, tmp_path, monkeypatch):
+        from video_summarizer.media import downloader
+
+        calls = []
+        out = tmp_path / "audio.wav"
+
+        def fake_run(cmd, capture_output=None, text=None):
+            calls.append(list(cmd))
+            out.write_bytes(b"fake wav")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(downloader.subprocess, "run", fake_run)
+        monkeypatch.setattr(downloader, "check_ytdlp_installed", lambda: True)
+
+        result = downloader.download_audio("BV1xx411c7mZ", out)
+        assert result == out
+        cmd = calls[0]
+        # Regression: the URL used to be missing entirely ("yt-dlp: error:
+        # You must provide at least one URL.") since the initial release
+        assert cmd[-1] == "https://www.bilibili.com/video/BV1xx411c7mZ"
+        assert "-x" in cmd
+        assert "--audio-format" in cmd
