@@ -1640,3 +1640,54 @@ class TestDownloadCookiesConfig:
 
         args = downloader.build_ytdlp_args("https://x.test/", cookies_file=str(ck))
         assert str(ck) in args
+
+
+class TestCjkSearchFallback:
+    def test_chinese_query_falls_back_to_like(self, tmp_path, monkeypatch):
+        """E2E regression: unicode61 FTS never matches CJK queries (whole
+        sentence is one token); search_fts must fall back to LIKE instead of
+        returning zero hits."""
+        import os
+        import sqlite3
+        from video_summarizer.search import evidence_retriever as er
+
+        db = tmp_path / "t.db"
+        con = sqlite3.connect(db)
+        con.executescript("""
+            CREATE TABLE videos (id INTEGER PRIMARY KEY, title TEXT);
+            CREATE TABLE transcript_segments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, video_id INTEGER,
+                start REAL, "end" REAL, text TEXT);
+            CREATE TABLE summary_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, video_id INTEGER,
+                start REAL, "end" REAL, summary TEXT);
+            CREATE TABLE final_summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, video_id INTEGER,
+                summary TEXT);
+        """)
+        con.execute("INSERT INTO videos VALUES (1, '充电器')")
+        con.execute("INSERT INTO transcript_segments (video_id, start, \"end\", text) VALUES (1, 1.0, 2.0, '包括桥式整流器、振荡器、变压器和反馈电路')")
+        con.commit()
+
+        class FakeConnCtx:
+            def __init__(self, c): self.c = c
+            def __enter__(self): return self.c
+            def __exit__(self, *a):
+                try: self.c.commit()
+                except Exception: pass
+
+        monkeypatch.setattr(er, "get_db", lambda: FakeConnCtx(con))
+        monkeypatch.setattr(er, "check_fts5_support", lambda: True)
+        # FTS MATCH executes but returns nothing for CJK (real-world behavior
+        # with unicode61); emulate by not creating any fts table and making
+        # the MATCH query raise -> no, search_fts would except. Instead run
+        # against empty FTS tables:
+        con.execute('CREATE VIRTUAL TABLE fts_transcripts USING fts5(video_id, segment_id, start, "end", text)')
+        con.execute('CREATE VIRTUAL TABLE fts_summaries USING fts5(video_id, chunk_id, start, "end", text)')
+        con.execute('CREATE VIRTUAL TABLE fts_final USING fts5(video_id, summary_id, text)')
+        con.commit()
+
+        rows = er.search_fts("整流器", None, 5)
+        assert len(rows) == 1
+        assert "整流器" in rows[0].text
+        assert rows[0].video_id == 1

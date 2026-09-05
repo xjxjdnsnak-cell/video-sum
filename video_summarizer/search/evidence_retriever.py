@@ -248,6 +248,13 @@ def search_fts(
                     source="final_summary"
                 ))
     
+    if not results:
+        # The default unicode61 tokenizer cannot segment CJK text: a whole
+        # Chinese sentence becomes a single token, so MATCH never fires for
+        # Chinese queries even when the text is indexed. LIKE search handles
+        # CJK correctly — fall back to it when FTS produced nothing.
+        return search_like(query, video_id, limit)
+
     results.sort(key=lambda x: x.score, reverse=True)
     return results[:limit]
 

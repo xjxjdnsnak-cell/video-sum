@@ -397,7 +397,7 @@ def _clear_previous_summary(video_id: int):
 def _run_summarize(
     video_path_or_url: str,
     is_url: bool,
-    llm_provider: str,
+    llm_provider: Optional[str],
     asr_provider: str,
     chunk_min: int,
     chunk_max: int,
@@ -418,6 +418,7 @@ def _run_summarize(
     note_style: NoteStyle = NoteStyle.DETAILED,
     allow_any_url: bool = False,
 ):
+    llm_provider = llm_provider or settings.LLM_PROVIDER
     use_mock_asr = asr_provider.lower() == "mock"
     check_dependencies(require_asr=not use_mock_asr)
 
@@ -740,7 +741,7 @@ def _do_transcribe(video_id, audio_path, use_mock_asr, model, device, language, 
 @app.command()
 def summarize_local(
     video_path: str = typer.Argument(..., help="本地视频文件路径"),
-    llm_provider: str = typer.Option("mock", "--llm-provider", help="LLM provider: mock, openai, ollama"),
+    llm_provider: Optional[str] = typer.Option(None, "--llm-provider", help="LLM provider: mock, openai, ollama (default: VIDEO_SUMMARIZER_LLM_PROVIDER from config)"),
     asr_provider: str = typer.Option("faster-whisper", "--asr-provider", help="ASR provider: faster-whisper, mock"),
     chunk_min: int = typer.Option(3, "--chunk-min", help="Minimum chunk duration in minutes"),
     chunk_max: int = typer.Option(5, "--chunk-max", help="Maximum chunk duration in minutes"),
@@ -777,7 +778,7 @@ def summarize_local(
 @app.command()
 def summarize_url(
     url: str = typer.Argument(..., help="B站视频链接或BV号"),
-    llm_provider: str = typer.Option("mock", "--llm-provider", help="LLM provider: mock, openai, ollama"),
+    llm_provider: Optional[str] = typer.Option(None, "--llm-provider", help="LLM provider: mock, openai, ollama (default: VIDEO_SUMMARIZER_LLM_PROVIDER from config)"),
     asr_provider: str = typer.Option("faster-whisper", "--asr-provider", help="ASR provider: faster-whisper, mock"),
     chunk_min: int = typer.Option(3, "--chunk-min", help="Minimum chunk duration in minutes"),
     chunk_max: int = typer.Option(5, "--chunk-max", help="Maximum chunk duration in minutes"),
@@ -1117,9 +1118,10 @@ def search(
 def ask(
     video_id: int = typer.Argument(..., help="视频ID"),
     question: str = typer.Argument(..., help="问题"),
-    llm_provider: str = typer.Option("mock", "--llm-provider", help="LLM provider: mock, openai, ollama"),
+    llm_provider: Optional[str] = typer.Option(None, "--llm-provider", help="LLM provider: mock, openai, ollama (default: VIDEO_SUMMARIZER_LLM_PROVIDER from config)"),
 ):
     """基于视频转写内容进行问答"""
+    llm_provider = llm_provider or settings.LLM_PROVIDER
     info = get_video_info(video_id)
     if not info:
         console.print(f"[red]Error: Video {video_id} not found[/red]")

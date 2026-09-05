@@ -1,5 +1,7 @@
 from pathlib import Path
 from typing import Literal
+
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from dotenv import load_dotenv
 
@@ -29,6 +31,14 @@ class Settings(BaseSettings):
     CHUNK_DURATION_MIN: int = 3
     CHUNK_DURATION_MAX: int = 5
     SRT_LANGUAGE: str = "zh"
+
+    @field_validator("DB_PATH", "OUTPUT_DIR", mode="after")
+    @classmethod
+    def _expand_tilde(cls, v: Path) -> Path:
+        # ".env" values like "~/video_summarizer_output" otherwise become a
+        # literal "~" directory relative to the process cwd (real-world bug
+        # found in E2E: outputs vanished into ./~/video_summarizer_output).
+        return v.expanduser()
 
     def ensure_directories(self):
         self.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
