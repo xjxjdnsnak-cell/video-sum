@@ -8,6 +8,8 @@ import time
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+import typer
+
 from video_summarizer.config import settings
 from video_summarizer.db import get_all_videos, get_video_info
 from video_summarizer.summarizer.pipeline import (
@@ -213,8 +215,12 @@ def render_new_task_form():
     with col3:
         chunk_min = st.slider("最小分段 (分钟)", 1, 10, 3)
         chunk_max = st.slider("最大分段 (分钟)", 2, 15, 5)
-        
+
         keep_audio = st.checkbox("保留音频文件")
+        force_rerun = st.checkbox(
+            "强制重跑（忽略已有结果）",
+            help="默认断点续跑：同一视频已完成的转写/摘要阶段会直接复用"
+        )
     
     st.markdown("---")
     
@@ -258,7 +264,8 @@ def render_new_task_form():
                             note_style=note_style,
                             chunk_min=chunk_min,
                             chunk_max=chunk_max,
-                            keep_audio=keep_audio
+                            keep_audio=keep_audio,
+                            force_rerun=force_rerun
                         )
                         
                         progress_bar.progress(100)
@@ -288,7 +295,8 @@ def render_new_task_form():
                         language=language,
                         note_style=note_style,
                         chunk_min=chunk_min,
-                        chunk_max=chunk_max
+                        chunk_max=chunk_max,
+                        force_rerun=force_rerun
                     )
                     
                     progress_bar.progress(100)
@@ -305,6 +313,61 @@ def render_new_task_form():
                 st.error(f"处理失败: {str(e)}")
 
 
+def _run_shared_pipeline(
+    video_path_or_url: str,
+    is_url: bool,
+    *,
+    asr_provider: str,
+    llm_provider: str,
+    whisper_model: str,
+    device: str,
+    language: str,
+    note_style: str,
+    chunk_min: int,
+    chunk_max: int,
+    keep_audio: bool,
+    cookies_file: str | None = None,
+    force_rerun: bool = False,
+) -> int:
+    """Delegate to the CLI's shared orchestration (audit A-5).
+
+    The web UI used to carry a second, drifting copy of the pipeline. There
+    is now a single implementation; the web layer only collects parameters
+    and translates the result back into a video id. Resume semantics come
+    for free (same source -> same video record -> completed stages skipped).
+    """
+    import typer
+
+    from video_summarizer.cli import _run_summarize
+    from video_summarizer.db import find_video_by_source, get_video_info, get_db
+    from video_summarizer.summarizer.prompts import NoteStyle as NS
+
+    _run_summarize(
+        video_path_or_url=video_path_or_url,
+        is_url=is_url,
+        llm_provider=llm_provider,
+        asr_provider=asr_provider,
+        chunk_min=chunk_min,
+        chunk_max=chunk_max,
+        output=None,
+        model=whisper_model,
+        device=device,
+        language=language,
+        model_dir=None,
+        keep_audio=keep_audio,
+        force=force_rerun,
+        resume=not force_rerun,
+        cookies=cookies_file if is_url else None,
+        note_style=NS[note_style.upper()],
+    )
+
+    with get_db() as conn:
+        row = find_video_by_source(conn, video_path_or_url, str(Path(video_path_or_url).resolve()))
+    if not row:
+        raise Exception("处理完成，但未找到视频记录，请查看历史页面。")
+    return row["id"]
+
+
 def process_local_video(
     video_path: str,
     asr_provider: str,
@@ -315,109 +378,23 @@ def process_local_video(
     note_style: str,
     chunk_min: int,
     chunk_max: int,
-    keep_audio: bool
+    keep_audio: bool,
+    force_rerun: bool = False
 ) -> int:
-    from video_summarizer.db import (
-        create_video_record, update_video_duration, update_video_status, update_video_stage,
-        find_video_by_source, get_db, clear_video_work_data
+    return _run_shared_pipeline(
+        str(video_path),
+        False,
+        asr_provider=asr_provider,
+        llm_provider=llm_provider,
+        whisper_model=whisper_model,
+        device=device,
+        language=language,
+        note_style=note_style,
+        chunk_min=chunk_min,
+        chunk_max=chunk_max,
+        keep_audio=keep_audio,
+        force_rerun=force_rerun,
     )
-    from video_summarizer.media.ffmpeg import extract_audio, get_video_duration, FFmpegError
-    from video_summarizer.asr.faster_whisper_engine import FasterWhisperEngine, FasterWhisperError
-    from video_summarizer.summarizer.pipeline import save_transcript, summarize_video_pipeline
-    from video_summarizer.exporters.markdown import export_markdown
-    from video_summarizer.exporters.json_exporter import export_json
-    from video_summarizer.exporters.srt import export_srt
-    from video_summarizer.summarizer.prompts import NoteStyle as NS
-    import tempfile
-
-    video_path = Path(video_path)
-    video_title = video_path.stem
-
-    # Reuse the record for the same source so video ids stay stable; the web UI
-    # always re-runs every stage, so clear the derived data to avoid duplicates.
-    with get_db() as conn:
-        existing = find_video_by_source(conn, str(video_path))
-
-    if existing:
-        video_id = existing["id"]
-        clear_video_work_data(video_id)
-    else:
-        video_id = create_video_record(
-            source_type="local",
-            source_path=str(video_path),
-            title=video_title
-        )
-    
-    update_video_status(video_id, "processing", "created")
-    
-    try:
-        duration = get_video_duration(str(video_path))
-        update_video_duration(video_id, duration)
-        
-        update_video_stage(video_id, "audio_extracted")
-        
-        audio_cache_dir = settings.OUTPUT_DIR / "audio_cache"
-        audio_cache_dir.mkdir(parents=True, exist_ok=True)
-        audio_path = audio_cache_dir / f"video_summarizer_{video_id}.wav"
-        extract_audio(str(video_path), str(audio_path))
-        
-        update_video_stage(video_id, "transcribed")
-        
-        use_mock = asr_provider == "mock"
-        
-        if use_mock:
-            transcript_data = [
-                {"start": 0.0, "end": 5.0, "text": "[Mock转写] 这是第一段转写内容", "source": "mock"},
-                {"start": 5.0, "end": 10.0, "text": "[Mock转写] 这是第二段转写内容", "source": "mock"},
-            ]
-        else:
-            engine = FasterWhisperEngine(
-                model_name=whisper_model,
-                device=device,
-                compute_type="float16" if device == "cuda" else "int8",
-                use_mock=False,
-                language=language if language != "auto" else None
-            )
-            segments = engine.transcribe(str(audio_path), language=language if language != "auto" else None)
-            transcript_data = [
-                {"start": s.start, "end": s.end, "text": s.text, "source": "asr"}
-                for s in segments
-            ]
-        
-        save_transcript(video_id, transcript_data)
-        
-        if not keep_audio and audio_path.exists():
-            audio_path.unlink()
-        
-        note_style_enum = NS[note_style.upper()]
-        result = summarize_video_pipeline(
-            video_id,
-            llm_provider=llm_provider,
-            chunk_min=chunk_min,
-            chunk_max=chunk_max,
-            note_style=note_style_enum
-        )
-        
-        update_video_stage(video_id, "exported")
-        
-        export_markdown(
-            video_id=video_id,
-            video_title=video_title,
-            transcript=transcript_data,
-            chunk_summaries=result["chunks"],
-            final_summary=result["final_summary"],
-            chapters=result.get("chapters", []),
-            quotes=result.get("quotes", []),
-            note_style=note_style_enum
-        )
-        
-        update_video_status(video_id, "completed", "exported")
-        
-        return video_id
-    
-    except Exception as e:
-        update_video_status(video_id, "failed")
-        raise
 
 
 def process_bilibili_url(
@@ -430,116 +407,34 @@ def process_bilibili_url(
     language: str = "auto",
     note_style: str = "detailed",
     chunk_min: int = 3,
-    chunk_max: int = 5
+    chunk_max: int = 5,
+    force_rerun: bool = False
 ) -> int:
-    from video_summarizer.db import (
-        create_video_record, update_video_status, update_video_stage,
-        find_video_by_source, get_db, clear_video_work_data
-    )
-    from video_summarizer.media.downloader import download_audio, download_subtitles, get_video_info, DownloaderError, normalize_bilibili_url
-    from video_summarizer.asr.subtitle_parser import parse_srt
-    from video_summarizer.summarizer.pipeline import save_transcript, summarize_video_pipeline
-    from video_summarizer.summarizer.prompts import NoteStyle as NS
-    from video_summarizer.exporters.markdown import export_markdown
-    import tempfile
-
-    # Reuse the record for the same URL so video ids stay stable; the web UI
-    # always re-runs every stage, so clear the derived data to avoid duplicates.
-    url_identity = normalize_bilibili_url(url)
-    with get_db() as conn:
-        existing = find_video_by_source(conn, url, url_identity)
-
-    if existing:
-        video_id = existing["id"]
-        clear_video_work_data(video_id)
-    else:
-        video_id = create_video_record(
-            source_type="url",
-            url=url_identity,
-            title=f"B站视频 {url}"
-        )
-    
-    update_video_status(video_id, "processing", "created")
-    
     try:
-        info = get_video_info(
+        return _run_shared_pipeline(
             url,
-            cookies_file=cookies_file
+            True,
+            asr_provider=asr_provider,
+            llm_provider=llm_provider,
+            whisper_model=whisper_model,
+            device=device,
+            language=language,
+            note_style=note_style,
+            chunk_min=chunk_min,
+            chunk_max=chunk_max,
+            keep_audio=False,
+            cookies_file=cookies_file,
+            force_rerun=force_rerun,
         )
-        
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
-            
-            srt_path = download_subtitles(url, temp_path, cookies_file=cookies_file)
-            
-            if srt_path and srt_path.exists():
-                transcript_data = parse_srt(str(srt_path))
-                transcript_data = [
-                    {"start": s.start, "end": s.end, "text": s.text, "source": "subtitle"}
-                    for s in transcript_data
-                ]
-                save_transcript(video_id, transcript_data)
-                update_video_stage(video_id, "transcribed")
-            else:
-                audio_path = temp_path / "audio.wav"
-                download_audio(url, audio_path, cookies_file=cookies_file)
-                update_video_stage(video_id, "audio_extracted")
-                
-                use_mock = asr_provider == "mock"
-                if use_mock:
-                    transcript_data = [
-                        {"start": 0.0, "end": 5.0, "text": "[Mock转写] 这是第一段转写内容", "source": "mock"},
-                        {"start": 5.0, "end": 10.0, "text": "[Mock转写] 这是第二段转写内容", "source": "mock"},
-                    ]
-                else:
-                    from video_summarizer.asr.faster_whisper_engine import FasterWhisperEngine
-                    engine = FasterWhisperEngine(
-                        model_name=whisper_model,
-                        device=device,
-                        use_mock=False,
-                        language=language if language != "auto" else None
-                    )
-                    segments = engine.transcribe(str(audio_path), language=language if language != "auto" else None)
-                    transcript_data = [
-                        {"start": s.start, "end": s.end, "text": s.text, "source": "asr"}
-                        for s in segments
-                    ]
-                
-                save_transcript(video_id, transcript_data)
-                update_video_stage(video_id, "transcribed")
-            
-            note_style_enum = NS[note_style.upper()]
-            result = summarize_video_pipeline(
-                video_id,
-                llm_provider=llm_provider,
-                chunk_min=chunk_min,
-                chunk_max=chunk_max,
-                note_style=note_style_enum
-            )
-            
-            update_video_stage(video_id, "exported")
-            
-            export_markdown(
-                video_id=video_id,
-                video_title=info.title,
-                transcript=transcript_data,
-                chunk_summaries=result["chunks"],
-                final_summary=result["final_summary"],
-                chapters=result.get("chapters", []),
-                quotes=result.get("quotes", []),
-                note_style=note_style_enum
-            )
-            
-            update_video_status(video_id, "completed", "exported")
-            
-            return video_id
-    
-    except DownloaderError as e:
-        update_video_status(video_id, "failed")
-        raise Exception(f"B站下载失败: {str(e)}")
-    except Exception as e:
-        update_video_status(video_id, "failed")
-        raise
+    except typer.Exit:
+        # The shared runner already printed the reason and recorded
+        # last_error on the video record; surface it in the UI.
+        from video_summarizer.db import find_video_by_source, get_db
+
+        with get_db() as conn:
+            row = find_video_by_source(conn, url, normalize_bilibili_url(url))
+        message = (row["last_error"] if row else None) or "处理失败，详情见服务端日志。"
+        raise Exception(f"处理失败: {message}")
 
 
 def render_history():

@@ -136,13 +136,15 @@ class TestMockPipeline:
         from video_summarizer.db import init_db
         init_db()
 
-        with patch('video_summarizer.media.ffmpeg.get_video_duration') as mock_duration:
-            with patch('video_summarizer.media.ffmpeg.extract_audio') as mock_extract:
-                with patch('video_summarizer.summarizer.pipeline.save_transcript') as mock_save:
-                    with patch('video_summarizer.summarizer.pipeline.summarize_video_pipeline') as mock_summarize:
-                        with patch('video_summarizer.exporters.markdown.export_markdown') as mock_export:
+        with patch('video_summarizer.cli.get_video_duration') as mock_duration:
+            with patch('video_summarizer.cli.extract_audio') as mock_extract:
+                with patch('video_summarizer.cli.save_transcript') as mock_save:
+                    with patch('video_summarizer.cli.summarize_video_pipeline') as mock_summarize:
+                        with patch('video_summarizer.cli.export_markdown') as mock_export:
                             mock_duration.return_value = 60.0
-                            mock_extract.return_value = None
+                            # The shared runner hands the extracted audio path
+                            # to the (mock) ASR engine, which checks existence.
+                            mock_extract.side_effect = lambda src, dst, **kw: Path(dst).write_bytes(b"")
                             mock_save.return_value = None
                             mock_summarize.return_value = {
                                 "chunks": [],
