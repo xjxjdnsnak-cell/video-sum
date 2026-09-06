@@ -136,7 +136,12 @@ class TestMockPipeline:
         from video_summarizer.db import init_db
         init_db()
 
-        with patch('video_summarizer.cli.get_video_duration') as mock_duration:
+        # CI runners have no FFmpeg; the shared runner's dependency check is
+        # correct for real runs, so stub the environment for this mock test.
+        patch_ffmpeg = patch('video_summarizer.cli.check_ffmpeg_installed', return_value=True)
+        patch_ytdlp = patch('video_summarizer.cli.check_ytdlp_installed', return_value=True)
+
+        with patch_ffmpeg, patch_ytdlp, patch('video_summarizer.cli.get_video_duration') as mock_duration:
             with patch('video_summarizer.cli.extract_audio') as mock_extract:
                 with patch('video_summarizer.cli.save_transcript') as mock_save:
                     with patch('video_summarizer.cli.summarize_video_pipeline') as mock_summarize:
